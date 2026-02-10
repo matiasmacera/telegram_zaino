@@ -354,6 +354,84 @@ La casa tiene:
 - Apple TVs, Samsung The Frame, PlayStation 5
 - 2 Home Assistant Voice (Escritorio y Quincho)
 
+=== SKILL: PILETA ===
+La pileta tiene MUCHOS sensores y controles. Cuando el usuario pregunte por la pileta, 
+consultá TODAS las entidades relevantes para dar un reporte completo.
+
+SENSORES DE AGUA (WaterGuru):
+- sensor.waterguru_water_temperature → Temperatura del agua
+- sensor.waterguru_ph → pH (ideal: 7.2-7.6). Tiene advice en atributos
+- sensor.waterguru_ph_alert → Estado del pH (Ok/LOW/HIGH)
+- sensor.waterguru_free_chlorine → Cloro libre (ideal: 1-3 ppm). Tiene advice
+- sensor.waterguru_free_chlorine_alert → Estado cloro
+- sensor.waterguru_total_alkalinity → Alcalinidad total (ideal: 80-120 ppm)
+- sensor.waterguru_total_alkalinity_alert → Estado alcalinidad
+- sensor.waterguru_calcium_hardness → Dureza cálcica
+- sensor.waterguru_calcium_hardness_alert → Estado dureza
+- sensor.waterguru_cyanuric_acid_stabilizer → Ácido cianúrico (estabilizador)
+- sensor.waterguru_cyanuric_acid_stabilizer_alert → Estado estabilizador
+- sensor.waterguru_total_hardness → Dureza total
+- sensor.waterguru_skimmer_flow → Flujo del skimmer (gpm)
+- sensor.waterguru_status → Estado general (GREEN/YELLOW/RED)
+- sensor.waterguru_battery → Batería WaterGuru
+- sensor.waterguru_cassette_days_remaining → Días restantes del cassette
+- sensor.waterguru_cassette_remaining → % restante cassette
+- sensor.waterguru_last_measurement → Última medición
+
+MONITOR PILETA (segundo sensor):
+- sensor.monitor_pileta_temperature → Temperatura (otro sensor)
+- sensor.monitor_pileta_total_dissolved_solids → TDS (ppm)
+- sensor.monitor_pileta_battery → Batería monitor
+
+CLIMATIZADOR:
+- climate.climatizador_pileta → Calefacción de pileta (current_temp, target_temp)
+
+FILTRADO Y LLENADO (Shelly switches):
+- switch.filtrado → Bomba de filtrado (on/off)
+- switch.llenado → Llenado de agua (on/off)
+- sensor.filtrado_power → Consumo actual filtrado (W)
+- sensor.filtrado_energy → Energía acumulada filtrado (kWh)
+- sensor.llenado_power → Consumo actual llenado (W)
+- sensor.llenado_energy → Energía acumulada llenado (kWh)
+- binary_sensor.filtrado_overcurrent → Alerta sobrecorriente
+- binary_sensor.llenado_overcurrent → Alerta sobrecorriente
+
+ILUMINACIÓN PILETA:
+- light.shellyplusrgbwpm_2cbcbbc14718 → Pileta RGB (RGBW, colores)
+- light.exterior_exterior_reflectores_pileta → Reflectores Pileta
+- light.exterior_exterior_solado_pileta → Solado Pileta
+- light.exterior_exterior_canteros_pileta → Canteros Pileta
+
+COVERS/SOMBRILLAS:
+- cover.sombrillas → Grupo: 3 sombrillas (gris 1, gris 2, roja)
+- cover.sombrilla_gris_1, cover.sombrilla_gris_2, cover.sombrilla_roja
+- cover.cortinas_pileta → Grupo: cortinas zona pileta
+
+SEGURIDAD PILETA:
+- lock.pileta → Cerradura lateral pileta (batería: sensor.pileta_battery)
+- binary_sensor.reja_jardin_pileta → Reja jardín-pileta (abierta/cerrada)
+- binary_sensor.reja_pileta_lateral → Reja pileta lateral
+- binary_sensor.puerta_bano_pileta → Puerta baño pileta
+
+SONOS PILETA:
+- media_player.pileta → Sonos Pileta
+
+RIEGO ZONA PILETA:
+- switch.canteros_pileta_y_galeria → Riego canteros pileta
+- switch.fondo_y_cantero_derecho_pileta → Riego fondo pileta
+
+Cuando el usuario pida estado de la pileta, hacé un reporte completo con:
+1. Temperatura agua (ambos sensores) y climatizador
+2. Química: pH, cloro, alcalinidad, estabilizador, dureza + alertas/consejos del WaterGuru
+3. Estado filtrado/llenado + consumo
+4. Estado WaterGuru (cassette, batería)
+5. Luces y sombrillas si es relevante
+6. Seguridad (rejas, cerradura, puerta) si es relevante
+
+Usá emojis para hacerlo visual: 🌡️ 🧪 💧 ⚗️ 🔬 💡 ☂️ 🔒
+
+=== FIN SKILLS ===
+
 Respondé siempre en español rioplatense, de forma concisa y directa.
 Cuando controles dispositivos, confirmá la acción brevemente.
 Si no estás seguro de un entity_id, usá search_entities primero.
@@ -458,6 +536,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Comandos:\n"
         "/reset - Limpiar conversación\n"
         "/status - Estado general de la casa\n"
+        "/pileta - Estado completo de la pileta\n"
         "/update - Actualizar bot desde GitHub",
         parse_mode="Markdown",
     )
@@ -492,6 +571,16 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
+
+
+@authorized
+async def cmd_pileta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.chat.send_action("typing")
+    response = await chat_with_claude(
+        update.effective_user.id,
+        "Dame el estado completo de la pileta: temperatura del agua (ambos sensores), química del agua (pH, cloro, alcalinidad, estabilizador, dureza con alertas y consejos del WaterGuru), estado del filtrado y llenado con consumo, estado del cassette WaterGuru, y cualquier alerta importante. Sé completo pero organizado.",
+    )
+    await send_long_message(update, response)
 
 
 @authorized
@@ -565,6 +654,7 @@ def main():
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("pileta", cmd_pileta))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
