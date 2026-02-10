@@ -605,6 +605,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status - Estado general de la casa\n"
         "/pileta - Estado completo de la pileta\n"
         "/musica - ¿Qué suena en la casa?\n"
+        "/logs - Ver logs del bot\n"
+        "/version - Versión y uptime\n"
         "/update - Actualizar bot desde GitHub",
         parse_mode="Markdown",
     )
@@ -659,6 +661,75 @@ async def cmd_musica(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Dame el estado de la música en la casa: qué parlantes están reproduciendo algo, qué suena en cada uno, volumen, y si hay grupos armados. Solo mostrá los que estén activos (playing/paused), no los idle.",
     )
     await send_long_message(update, response)
+
+
+@authorized
+async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show last N lines of bot logs."""
+    try:
+        n = 30
+        args = context.args
+        if args and args[0].isdigit():
+            n = min(int(args[0]), 100)
+
+        import subprocess
+        result = subprocess.run(
+            ["tail", "-n", str(n), "/proc/1/fd/1"],
+            capture_output=True, text=True, timeout=5
+        )
+        # Fallback: read from docker logs via internal log
+        if not result.stdout.strip():
+            # Use logging records
+            lines = []
+            log_handler = None
+            for h in logging.getLogger().handlers:
+                if hasattr(h, 'stream'):
+                    lines.append("(logs only available via docker logs)")
+                    break
+            output = "\n".join(lines) if lines else "No logs available. Usá `docker logs zaino-telegram-bot --tail 30` en el host."
+        else:
+            output = result.stdout.strip()
+
+        if len(output) > 4000:
+            output = output[-4000:]
+
+        await update.message.reply_text(f"```\n{output}\n```", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+
+
+@authorized
+async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current bot version and uptime."""
+    try:
+        import subprocess
+        # Git commit
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-5"],
+            capture_output=True, text=True, timeout=5,
+            cwd="/app" if os.path.exists("/app/.git") else "."
+        )
+        git_info = result.stdout.strip() if result.stdout else "Git info not available"
+
+        # Uptime
+        import time
+        with open("/proc/uptime", "r") as f:
+            uptime_seconds = float(f.read().split()[0])
+        hours = int(uptime_seconds // 3600)
+        minutes = int((uptime_seconds % 3600) // 60)
+
+        # Container start time
+        start_time = datetime.now() - timedelta(seconds=uptime_seconds)
+
+        text = (
+            f"🤖 *Zaino Bot*\n\n"
+            f"⏱ Uptime: {hours}h {minutes}m\n"
+            f"🕐 Inicio: {start_time.strftime('%d/%m %H:%M')}\n\n"
+            f"📦 Últimos commits:\n```\n{git_info}\n```"
+        )
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 @authorized
@@ -916,6 +987,8 @@ def main():
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("pileta", cmd_pileta))
     app.add_handler(CommandHandler("musica", cmd_musica))
+    app.add_handler(CommandHandler("logs", cmd_logs))
+    app.add_handler(CommandHandler("version", cmd_version))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
