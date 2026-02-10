@@ -1,4 +1,7 @@
 .env
+.trigger/
 update.log
+updater.log
+updater-error.log
 __pycache__/
 *.pyc

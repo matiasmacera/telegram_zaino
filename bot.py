@@ -31,6 +31,7 @@ HA_URL = os.environ.get("HA_URL", "http://homeassistant.local:8123")
 HA_TOKEN = os.environ["HA_TOKEN"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
 MAX_CONVERSATION_MESSAGES = 20
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -455,7 +456,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🎤 _Mandá un audio pidiendo lo que quieras_\n\n"
         "Comandos:\n"
         "/reset - Limpiar conversación\n"
-        "/status - Estado general de la casa",
+        "/status - Estado general de la casa\n"
+        "/update - Actualizar bot desde GitHub",
         parse_mode="Markdown",
     )
 
@@ -474,6 +476,21 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Dame un resumen rápido del estado de la casa: luces encendidas, temperatura de los aires encendidos, estado de la alarma, y estado de las cerraduras. Sé conciso.",
     )
     await send_long_message(update, response)
+
+
+@authorized
+async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Trigger bot update from GitHub."""
+    try:
+        os.makedirs(TRIGGER_DIR, exist_ok=True)
+        trigger_file = os.path.join(TRIGGER_DIR, "update")
+        with open(trigger_file, "w") as f:
+            f.write(datetime.now().isoformat())
+        await update.message.reply_text(
+            "🔄 Update disparado. El bot se va a reiniciar en unos segundos con la última versión del repo."
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 
 @authorized
@@ -542,6 +559,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
