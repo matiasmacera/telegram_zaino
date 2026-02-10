@@ -32,6 +32,7 @@ HA_TOKEN = os.environ["HA_TOKEN"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
+HEALTH_FILE = "/tmp/bot_healthy"
 MAX_CONVERSATION_MESSAGES = 20
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -554,6 +555,10 @@ async def send_long_message(update: Update, text: str):
 def main():
     logger.info("Starting Zaino Home Assistant Bot...")
 
+    # Write initial health file
+    with open(HEALTH_FILE, "w") as f:
+        f.write(datetime.now().isoformat())
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -562,6 +567,13 @@ def main():
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+
+    # Health heartbeat: update file every 30s so Docker knows we're alive
+    async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
+        with open(HEALTH_FILE, "w") as f:
+            f.write(datetime.now().isoformat())
+
+    app.job_queue.run_repeating(heartbeat, interval=30, first=10)
 
     logger.info("Bot is running. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
