@@ -430,6 +430,71 @@ Cuando el usuario pida estado de la pileta, hacé un reporte completo con:
 
 Usá emojis para hacerlo visual: 🌡️ 🧪 💧 ⚗️ 🔬 💡 ☂️ 🔒
 
+=== SKILL: MÚSICA / SONOS ===
+La casa tiene 18 parlantes Sonos + HomePod + Apple TVs + TVs.
+
+PARLANTES SONOS (entity_id → nombre, volumen habitual):
+- media_player.estar → Estar (0.14) - surround con Sub y Rear
+- media_player.estar_300 → Estar 300 (0.4)
+- media_player.living → Living (0.31)
+- media_player.living_lampara → Entrada (0.76)
+- media_player.cocina → Cocina (0.18)
+- media_player.escritorio → Escritorio (0.08) - surround
+- media_player.escritorio_cuadro → Escritorio Cuadro (0.39)
+- media_player.quincho → Quincho (0.19)
+- media_player.playroom → Playroom (0.39)
+- media_player.pileta → Pileta (0.67) - surround
+- media_player.terraza → Terraza (0.18) - surround
+- media_player.galeria_mesa → Galería Mesa (0.33)
+- media_player.galeria_estar → Galería Estar (0.34)
+- media_player.vestidor → Vestidor (0.22)
+- media_player.huespedes → Huéspedes (0.19)
+- media_player.bano_suite → Baño Suite (0.03)
+- media_player.casita_del_arbol → Casita Juegos (0.49)
+
+OTROS:
+- media_player.estar_pa → HomePod Mini Estar PA
+- media_player.atv_quincho / atv_escritorio / atv_huespedes → Apple TVs
+- media_player.samsung_the_frame_65_qn65ls03aagc → Samsung The Frame
+- media_player.tv_playroom → TV LG Playroom
+- media_player.playstation_5 → PlayStation 5
+
+SERVICIOS CLAVE (usar con call_service domain="media_player"):
+- volume_set: data={"entity_id": "...", "volume_level": 0.0-1.0}
+- volume_up / volume_down: data={"entity_id": "..."}
+- media_play / media_pause / media_play_pause: data={"entity_id": "..."}
+- media_next_track / media_previous_track: data={"entity_id": "..."}
+- play_media: data={"entity_id": "...", "media_content_id": "URL_O_URI", "media_content_type": "music"}
+- join: data={"entity_id": "speaker_principal", "group_members": ["sp1", "sp2", ...]}
+  → Agrupa parlantes en multiroom. El entity_id es el coordinador.
+- unjoin: data={"entity_id": "..."} → Desagrupa
+- shuffle_set: data={"entity_id": "...", "shuffle": true/false}
+- repeat_set: data={"entity_id": "...", "repeat": "off"/"one"/"all"}
+- select_source: data={"entity_id": "...", "source": "TV"/"Line-in"}
+
+SERVICIOS SONOS (domain="sonos"):
+- set_sleep_timer: data={"entity_id": "...", "sleep_time": minutos}
+- clear_sleep_timer: data={"entity_id": "..."}
+- snapshot / restore: guardar/restaurar estado
+
+ZONAS LÓGICAS para agrupar multiroom:
+- Exterior: pileta, terraza, galeria_mesa, galeria_estar, casita_del_arbol
+- Planta baja: estar, living, cocina, living_lampara (entrada), estar_300
+- Suite: escritorio, escritorio_cuadro, vestidor, bano_suite
+- Quincho: quincho
+- Dormitorios: playroom, huespedes
+
+COMPORTAMIENTO:
+- "Poné música en X" sin especificar qué → preguntale qué quiere escuchar o sugerí algo
+- "Poné X en Y" → usá play_media en el parlante Y
+- "Música en toda la casa" / "en todos lados" → agrupá todos los Sonos con join
+- "Música afuera" → agrupá zona Exterior
+- "Bajá/subí el volumen de X" → volume_set
+- "¿Qué suena?" → consultá estado de todos los media_players, mostrá los que estén playing
+- "Pará la música" → media_pause en los que estén playing
+- "Siguiente canción" → media_next_track
+- Volumen: siempre entre 0.0 y 1.0 (0.5 = 50%)
+
 === FIN SKILLS ===
 
 Respondé siempre en español rioplatense, de forma concisa y directa.
@@ -537,6 +602,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/reset - Limpiar conversación\n"
         "/status - Estado general de la casa\n"
         "/pileta - Estado completo de la pileta\n"
+        "/musica - ¿Qué suena en la casa?\n"
         "/update - Actualizar bot desde GitHub",
         parse_mode="Markdown",
     )
@@ -579,6 +645,16 @@ async def cmd_pileta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = await chat_with_claude(
         update.effective_user.id,
         "Dame el estado completo de la pileta: temperatura del agua (ambos sensores), química del agua (pH, cloro, alcalinidad, estabilizador, dureza con alertas y consejos del WaterGuru), estado del filtrado y llenado con consumo, estado del cassette WaterGuru, y cualquier alerta importante. Sé completo pero organizado.",
+    )
+    await send_long_message(update, response)
+
+
+@authorized
+async def cmd_musica(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.chat.send_action("typing")
+    response = await chat_with_claude(
+        update.effective_user.id,
+        "Dame el estado de la música en la casa: qué parlantes están reproduciendo algo, qué suena en cada uno, volumen, y si hay grupos armados. Solo mostrá los que estén activos (playing/paused), no los idle.",
     )
     await send_long_message(update, response)
 
@@ -655,6 +731,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("pileta", cmd_pileta))
+    app.add_handler(CommandHandler("musica", cmd_musica))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
