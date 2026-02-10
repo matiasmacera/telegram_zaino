@@ -878,14 +878,14 @@ async def send_waterguru_report():
         lines.append(f"⚗️ pH: *{ph}* {ph_alert}")
         advice = get_advice("sensor.waterguru_ph_alert")
         if advice:
-            lines.append(f"   _{advice}_")
+            lines.append(f"   → {advice}")
 
         cl = get_val("sensor.waterguru_free_chlorine")
         cl_alert = get_alert("sensor.waterguru_free_chlorine_alert")
         lines.append(f"🧪 Cloro: *{cl} ppm* {cl_alert}")
         advice = get_advice("sensor.waterguru_free_chlorine_alert")
         if advice:
-            lines.append(f"   _{advice}_")
+            lines.append(f"   → {advice}")
 
         alk = get_val("sensor.waterguru_total_alkalinity")
         alk_alert = get_alert("sensor.waterguru_total_alkalinity_alert")
@@ -896,7 +896,7 @@ async def send_waterguru_report():
         lines.append(f"🛡️ Estabilizador: *{cya} ppm* {cya_alert}")
         advice = get_advice("sensor.waterguru_cyanuric_acid_stabilizer_alert")
         if advice:
-            lines.append(f"   _{advice}_")
+            lines.append(f"   → {advice}")
 
         hard = get_val("sensor.waterguru_calcium_hardness")
         hard_alert = get_alert("sensor.waterguru_calcium_hardness_alert")
@@ -919,11 +919,20 @@ async def send_waterguru_report():
 
         report = "\n".join(lines)
 
-        await telegram_bot.send_message(
-            chat_id=TELEGRAM_USER_ID,
-            text=report,
-            parse_mode="Markdown",
-        )
+        # Try Markdown first, fallback to plain text
+        try:
+            await telegram_bot.send_message(
+                chat_id=TELEGRAM_USER_ID,
+                text=report,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            # Strip markdown formatting and send plain
+            plain = report.replace("*", "").replace("_", "")
+            await telegram_bot.send_message(
+                chat_id=TELEGRAM_USER_ID,
+                text=plain,
+            )
         logger.info("WaterGuru report sent")
 
     except Exception as e:
