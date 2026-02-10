@@ -1,0 +1,159 @@
+#!/bin/bash
+# ============================================================
+# Zaino Unified Monitor
+# - Checks HAOS VM is running and responsive
+# - Checks Telegram bot Docker container is healthy
+# - Watches for /update trigger from Telegram bot
+# - Sends all notifications via Zaino Telegram bot
+# ============================================================
+
+# === CONFIG ===
+HA_URL="http://192.168.99.232:8123"
+VM_NAME="Home Assistant"
+MAX_RETRIES=3
+RETRY_DELAY=30
+
+REPO_DIR="$HOME/zaino-telegram-bot"
+CONTAINER_NAME="zaino-telegram-bot"
+TRIGGER_FILE="$REPO_DIR/.trigger/update"
+
+LOG_FILE="$HOME/zaino-monitor/monitor.log"
+UTMCTL="/Applications/UTM.app/Contents/MacOS/utmctl"
+
+# Telegram (Zaino bot)
+TELEGRAM_BOT_TOKEN="8522322427:AAGySbfSObmAJeG0F-a40OKXsRZAwsljJ9Y"
+TELEGRAM_CHAT_ID="288671506"
+
+# === SETUP ===
+mkdir -p "$HOME/zaino-monitor"
+mkdir -p "$REPO_DIR/.trigger"
+
+# === FUNCTIONS ===
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+send_telegram() {
+    local message="$1"
+    curl -s -X POST \
+        "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="${TELEGRAM_CHAT_ID}" \
+        -d text="$message" \
+        -d parse_mode="HTML" > /dev/null 2>&1
+}
+
+check_ha() {
+    curl -s -o /dev/null -w "%{http_code}" \
+        --connect-timeout 10 --max-time 15 "$HA_URL" 2>/dev/null
+}
+
+restart_vm() {
+    log "HAOS: Reiniciando VM '$VM_NAME'..."
+    send_telegram "⚠️ <b>Home Assistant no responde</b> - Reiniciando VM..."
+
+    $UTMCTL stop "$VM_NAME" 2>/dev/null
+    sleep 10
+    $UTMCTL start "$VM_NAME"
+
+    log "HAOS: VM reiniciada. Esperando 120s..."
+    sleep 120
+
+    response=$(check_ha)
+    if [[ "$response" =~ ^(200|301|302|401|403)$ ]]; then
+        log "HAOS: Recuperado después de reinicio"
+        send_telegram "✅ <b>Home Assistant recuperado</b> - VM reiniciada exitosamente."
+    else
+        log "HAOS: Sigue sin responder después de reinicio"
+        send_telegram "🔴 <b>ALERTA:</b> HA sigue sin responder después de reiniciar la VM."
+    fi
+}
+
+check_docker_container() {
+    # Check if container is running
+    local status
+    status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
+
+    if [[ "$status" != "running" ]]; then
+        log "DOCKER: Container '$CONTAINER_NAME' not running (status: $status). Starting..."
+        send_telegram "🐳 <b>Bot caído</b> - Reiniciando container..."
+        cd "$REPO_DIR"
+        docker compose up -d >> "$LOG_FILE" 2>&1
+        sleep 10
+
+        status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
+        if [[ "$status" == "running" ]]; then
+            log "DOCKER: Container recovered"
+            send_telegram "✅ <b>Bot recuperado</b> - Container reiniciado."
+        else
+            log "DOCKER: Container still not running after restart"
+            send_telegram "🔴 <b>ALERTA:</b> Bot no pudo reiniciar. Revisar manualmente."
+        fi
+    fi
+}
+
+check_update_trigger() {
+    if [[ -f "$TRIGGER_FILE" ]]; then
+        log "UPDATE: Trigger detected, pulling and rebuilding..."
+        rm -f "$TRIGGER_FILE"
+
+        cd "$REPO_DIR"
+        git pull origin main >> "$LOG_FILE" 2>&1
+
+        docker compose down >> "$LOG_FILE" 2>&1
+        docker compose build >> "$LOG_FILE" 2>&1
+        docker compose up -d >> "$LOG_FILE" 2>&1
+
+        log "UPDATE: Complete"
+    fi
+}
+
+# === MAIN LOOP ===
+log "Monitor started"
+
+while true; do
+    # 1. Check for /update trigger (every 2s via the loop)
+    check_update_trigger
+
+    # 2. Every 3 minutes: check HAOS + Docker
+    CURRENT_TIME=$(date +%s)
+    LAST_CHECK_FILE="$HOME/zaino-monitor/.last_check"
+
+    if [[ -f "$LAST_CHECK_FILE" ]]; then
+        LAST_CHECK=$(cat "$LAST_CHECK_FILE")
+    else
+        LAST_CHECK=0
+    fi
+
+    ELAPSED=$((CURRENT_TIME - LAST_CHECK))
+
+    if [[ $ELAPSED -ge 180 ]]; then
+        # Check HAOS
+        failures=0
+        for ((i=1; i<=MAX_RETRIES; i++)); do
+            response=$(check_ha)
+            if [[ "$response" =~ ^(200|301|302|401|403)$ ]]; then
+                log "HAOS: OK (response: $response)"
+                failures=0
+                break
+            else
+                failures=$((failures + 1))
+                log "HAOS: Intento $i/$MAX_RETRIES fallido (response: $response)"
+                if [[ $i -lt $MAX_RETRIES ]]; then
+                    sleep $RETRY_DELAY
+                fi
+            fi
+        done
+
+        if [[ $failures -ge $MAX_RETRIES ]]; then
+            restart_vm
+        fi
+
+        # Check Docker container
+        check_docker_container
+
+        # Update last check time
+        echo "$CURRENT_TIME" > "$LAST_CHECK_FILE"
+    fi
+
+    sleep 2
+done
