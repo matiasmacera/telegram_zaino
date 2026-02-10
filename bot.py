@@ -580,6 +580,28 @@ async def chat_with_claude(user_id: int, message: str) -> str:
 # ─── Telegram Handlers ───────────────────────────────────────────────────────
 
 
+async def keep_typing(chat, stop_event):
+    """Keep sending 'typing' action every 4s until stop_event is set."""
+    while not stop_event.is_set():
+        try:
+            await chat.send_action("typing")
+        except Exception:
+            pass
+        await asyncio.sleep(4)
+
+
+async def run_with_typing(update, coro):
+    """Run a coroutine while showing typing indicator."""
+    stop_event = asyncio.Event()
+    typing_task = asyncio.create_task(keep_typing(update.message.chat, stop_event))
+    try:
+        result = await coro
+        return result
+    finally:
+        stop_event.set()
+        await typing_task
+
+
 def authorized(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != TELEGRAM_USER_ID:
@@ -620,11 +642,10 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.chat.send_action("typing")
-    response = await chat_with_claude(
+    response = await run_with_typing(update, chat_with_claude(
         update.effective_user.id,
         "Dame un resumen rápido del estado de la casa: luces encendidas, temperatura de los aires encendidos, estado de la alarma, y estado de las cerraduras. Sé conciso.",
-    )
+    ))
     await send_long_message(update, response)
 
 
@@ -645,21 +666,19 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_pileta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.chat.send_action("typing")
-    response = await chat_with_claude(
+    response = await run_with_typing(update, chat_with_claude(
         update.effective_user.id,
         "Dame el estado completo de la pileta: temperatura del agua (ambos sensores), química del agua (pH, cloro, alcalinidad, estabilizador, dureza con alertas y consejos del WaterGuru), estado del filtrado y llenado con consumo, estado del cassette WaterGuru, y cualquier alerta importante. Sé completo pero organizado.",
-    )
+    ))
     await send_long_message(update, response)
 
 
 @authorized
 async def cmd_musica(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.chat.send_action("typing")
-    response = await chat_with_claude(
+    response = await run_with_typing(update, chat_with_claude(
         update.effective_user.id,
         "Dame el estado de la música en la casa: qué parlantes están reproduciendo algo, qué suena en cada uno, volumen, y si hay grupos armados. Solo mostrá los que estén activos (playing/paused), no los idle.",
-    )
+    ))
     await send_long_message(update, response)
 
 
@@ -734,8 +753,7 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.chat.send_action("typing")
-    response = await chat_with_claude(update.effective_user.id, update.message.text)
+    response = await run_with_typing(update, chat_with_claude(update.effective_user.id, update.message.text))
     await send_long_message(update, response)
 
 
@@ -762,8 +780,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(f"🎤 _{transcribed_text}_", parse_mode="Markdown")
 
-        await update.message.chat.send_action("typing")
-        response = await chat_with_claude(update.effective_user.id, transcribed_text)
+        response = await run_with_typing(update, chat_with_claude(update.effective_user.id, transcribed_text))
         await send_long_message(update, response)
 
     except Exception as e:
