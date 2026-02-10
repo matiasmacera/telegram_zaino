@@ -740,7 +740,19 @@ def main():
         with open(HEALTH_FILE, "w") as f:
             f.write(datetime.now().isoformat())
 
+    # Send startup notification
+    async def startup_notify(context: ContextTypes.DEFAULT_TYPE):
+        try:
+            await context.bot.send_message(
+                chat_id=TELEGRAM_USER_ID,
+                text="✅ *Zaino Bot iniciado*\nConectado y listo.",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.error(f"Startup notification error: {e}")
+
     app.job_queue.run_repeating(heartbeat, interval=30, first=10)
+    app.job_queue.run_once(startup_notify, when=2)
 
     logger.info("Bot is running. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
