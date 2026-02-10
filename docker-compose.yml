@@ -5,8 +5,6 @@ services:
     restart: always
     env_file:
       - .env
-    ports:
-      - "8765:8765"
     volumes:
       - ./.trigger:/trigger
     healthcheck:

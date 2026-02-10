@@ -10,11 +10,9 @@ import json
 import logging
 import tempfile
 import asyncio
-import threading
 from datetime import datetime, timedelta
 
 import httpx
-from aiohttp import web
 from telegram import Update, Bot
 from telegram.ext import (
     ApplicationBuilder,
@@ -36,8 +34,7 @@ CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
 HEALTH_FILE = "/tmp/bot_healthy"
-WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8765"))
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "zaino-ha-webhook-secret")
+WATERGURU_LAST_FILE = "/tmp/waterguru_last"
 MAX_CONVERSATION_MESSAGES = 20
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -719,76 +716,41 @@ async def send_long_message(update: Update, text: str):
             await update.message.reply_text(text)
 
 
-# ─── Webhook Server ───────────────────────────────────────────────────────────
+# ─── WaterGuru Polling ────────────────────────────────────────────────────────
 
 telegram_bot: Bot = None
-
-
-async def handle_webhook(request):
-    """Handle incoming webhooks from Home Assistant."""
-    try:
-        data = await request.json()
-
-        # Validate secret
-        if data.get("secret") != WEBHOOK_SECRET:
-            logger.warning("Webhook: invalid secret")
-            return web.json_response({"error": "unauthorized"}, status=401)
-
-        event_type = data.get("type", "generic")
-        message = data.get("message", "")
-
-        logger.info(f"Webhook received: type={event_type}")
-
-        if event_type == "waterguru_measurement":
-            # Fetch all WaterGuru data and send a nice report
-            await send_waterguru_report()
-        elif message:
-            # Generic notification
-            await telegram_bot.send_message(
-                chat_id=TELEGRAM_USER_ID,
-                text=message,
-                parse_mode="Markdown",
-            )
-
-        return web.json_response({"status": "ok"})
-
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return web.json_response({"error": str(e)}, status=500)
 
 
 async def send_waterguru_report():
     """Fetch all WaterGuru sensors and send a formatted report."""
     try:
-        sensors = {
-            "sensor.waterguru_water_temperature": "🌡️ Temperatura",
-            "sensor.waterguru_ph": "⚗️ pH",
-            "sensor.waterguru_ph_alert": None,
-            "sensor.waterguru_free_chlorine": "🧪 Cloro libre",
-            "sensor.waterguru_free_chlorine_alert": None,
-            "sensor.waterguru_total_alkalinity": "💧 Alcalinidad",
-            "sensor.waterguru_total_alkalinity_alert": None,
-            "sensor.waterguru_cyanuric_acid_stabilizer": "🛡️ Estabilizador",
-            "sensor.waterguru_cyanuric_acid_stabilizer_alert": None,
-            "sensor.waterguru_calcium_hardness": "🧱 Dureza cálcica",
-            "sensor.waterguru_calcium_hardness_alert": None,
-            "sensor.waterguru_total_hardness": "🔬 Dureza total",
-            "sensor.waterguru_total_hardness_alert": None,
-            "sensor.waterguru_skimmer_flow": "🌊 Flujo skimmer",
-            "sensor.waterguru_skimmer_flow_alert": None,
-            "sensor.waterguru_status": None,
-            "sensor.waterguru_cassette_days_remaining": None,
-            "sensor.waterguru_cassette_remaining": None,
-            "sensor.monitor_pileta_temperature": None,
-            "sensor.monitor_pileta_total_dissolved_solids": None,
-            "sensor.filtrado_power": None,
-            "sensor.llenado_power": None,
-            "switch.filtrado": None,
-            "switch.llenado": None,
-        }
+        sensor_ids = [
+            "sensor.waterguru_water_temperature",
+            "sensor.waterguru_ph",
+            "sensor.waterguru_ph_alert",
+            "sensor.waterguru_free_chlorine",
+            "sensor.waterguru_free_chlorine_alert",
+            "sensor.waterguru_total_alkalinity",
+            "sensor.waterguru_total_alkalinity_alert",
+            "sensor.waterguru_cyanuric_acid_stabilizer",
+            "sensor.waterguru_cyanuric_acid_stabilizer_alert",
+            "sensor.waterguru_calcium_hardness",
+            "sensor.waterguru_calcium_hardness_alert",
+            "sensor.waterguru_total_hardness",
+            "sensor.waterguru_total_hardness_alert",
+            "sensor.waterguru_skimmer_flow",
+            "sensor.waterguru_skimmer_flow_alert",
+            "sensor.waterguru_status",
+            "sensor.waterguru_cassette_days_remaining",
+            "sensor.waterguru_cassette_remaining",
+            "sensor.monitor_pileta_temperature",
+            "sensor.monitor_pileta_total_dissolved_solids",
+            "switch.filtrado",
+            "switch.llenado",
+        ]
 
         data = {}
-        for eid in sensors:
+        for eid in sensor_ids:
             try:
                 resp = await http_client.get(f"/api/states/{eid}")
                 if resp.status_code == 200:
@@ -800,7 +762,6 @@ async def send_waterguru_report():
             except Exception:
                 pass
 
-        # Build report
         status_emoji = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(
             data.get("sensor.waterguru_status", {}).get("state", ""), "⚪"
         )
@@ -818,7 +779,7 @@ async def send_waterguru_report():
         def get_advice(eid):
             return data.get(eid, {}).get("attrs", {}).get("advice", "")
 
-        temp = get_val('sensor.waterguru_water_temperature')
+        temp = get_val("sensor.waterguru_water_temperature")
         try:
             temp_str = f"{float(temp):.1f}°C"
         except (ValueError, TypeError):
@@ -830,7 +791,6 @@ async def send_waterguru_report():
             f"🌡️ *Agua:* {temp_str}",
         ]
 
-        # Monitor pileta temp
         monitor_temp = get_val("sensor.monitor_pileta_temperature")
         if monitor_temp != "?":
             lines.append(f"🌡️ *Monitor:* {monitor_temp}°C")
@@ -842,7 +802,6 @@ async def send_waterguru_report():
         lines.append("")
         lines.append("*Química del agua:*")
 
-        # pH
         ph = get_val("sensor.waterguru_ph")
         ph_alert = get_alert("sensor.waterguru_ph_alert")
         lines.append(f"⚗️ pH: *{ph}* {ph_alert}")
@@ -850,7 +809,6 @@ async def send_waterguru_report():
         if advice:
             lines.append(f"   _{advice}_")
 
-        # Chlorine
         cl = get_val("sensor.waterguru_free_chlorine")
         cl_alert = get_alert("sensor.waterguru_free_chlorine_alert")
         lines.append(f"🧪 Cloro: *{cl} ppm* {cl_alert}")
@@ -858,12 +816,10 @@ async def send_waterguru_report():
         if advice:
             lines.append(f"   _{advice}_")
 
-        # Alkalinity
         alk = get_val("sensor.waterguru_total_alkalinity")
         alk_alert = get_alert("sensor.waterguru_total_alkalinity_alert")
         lines.append(f"💧 Alcalinidad: *{alk} ppm* {alk_alert}")
 
-        # Stabilizer
         cya = get_val("sensor.waterguru_cyanuric_acid_stabilizer")
         cya_alert = get_alert("sensor.waterguru_cyanuric_acid_stabilizer_alert")
         lines.append(f"🛡️ Estabilizador: *{cya} ppm* {cya_alert}")
@@ -871,26 +827,24 @@ async def send_waterguru_report():
         if advice:
             lines.append(f"   _{advice}_")
 
-        # Hardness
         hard = get_val("sensor.waterguru_calcium_hardness")
         hard_alert = get_alert("sensor.waterguru_calcium_hardness_alert")
-        lines.append(f"�🧱 Dureza: *{hard} ppm* {hard_alert}")
+        lines.append(f"🧱 Dureza: *{hard} ppm* {hard_alert}")
 
-        # Skimmer flow
         flow = get_val("sensor.waterguru_skimmer_flow")
         flow_alert = get_alert("sensor.waterguru_skimmer_flow_alert")
         lines.append(f"🌊 Flujo: *{flow} gpm* {flow_alert}")
 
-        # Cassette
         cassette_days = get_val("sensor.waterguru_cassette_days_remaining")
         cassette_pct = get_val("sensor.waterguru_cassette_remaining")
         lines.append("")
         lines.append(f"📦 Cassette: {cassette_pct}% ({cassette_days} días)")
 
-        # Filtrado/Llenado
         filtrado = get_val("switch.filtrado")
         llenado = get_val("switch.llenado")
-        lines.append(f"⚙️ Filtrado: {'🟢 ON' if filtrado == 'on' else '⚪ OFF'} | Llenado: {'🟢 ON' if llenado == 'on' else '⚪ OFF'}")
+        filt_str = "🟢 ON" if filtrado == "on" else "⚪ OFF"
+        llen_str = "🟢 ON" if llenado == "on" else "⚪ OFF"
+        lines.append(f"⚙️ Filtrado: {filt_str} | Llenado: {llen_str}")
 
         report = "\n".join(lines)
 
@@ -903,25 +857,43 @@ async def send_waterguru_report():
 
     except Exception as e:
         logger.error(f"WaterGuru report error: {e}")
-        await telegram_bot.send_message(
-            chat_id=TELEGRAM_USER_ID,
-            text=f"🏊 Nueva medición WaterGuru recibida pero hubo un error armando el reporte: {e}",
-        )
+        try:
+            await telegram_bot.send_message(
+                chat_id=TELEGRAM_USER_ID,
+                text=f"🏊 Nueva medición WaterGuru pero hubo error: {e}",
+            )
+        except Exception:
+            pass
 
 
-def run_webhook_server():
-    """Run the webhook server in a separate thread."""
-    app = web.Application()
-    app.router.add_post("/webhook", handle_webhook)
+async def waterguru_poll(context):
+    """Poll WaterGuru last_measurement every 30 min. Send report if new."""
+    try:
+        resp = await http_client.get("/api/states/sensor.waterguru_last_measurement")
+        if resp.status_code != 200:
+            return
+        current = resp.json()["state"]
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    runner = web.AppRunner(app)
-    loop.run_until_complete(runner.setup())
-    site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
-    loop.run_until_complete(site.start())
-    logger.info(f"Webhook server listening on port {WEBHOOK_PORT}")
-    loop.run_forever()
+        last = ""
+        try:
+            with open(WATERGURU_LAST_FILE, "r") as f:
+                last = f.read().strip()
+        except FileNotFoundError:
+            with open(WATERGURU_LAST_FILE, "w") as f:
+                f.write(current)
+            logger.info(f"WaterGuru poll: initial value saved ({current})")
+            return
+
+        if current != last and current not in ("unknown", "unavailable", ""):
+            logger.info(f"WaterGuru: new measurement detected ({last} -> {current})")
+            with open(WATERGURU_LAST_FILE, "w") as f:
+                f.write(current)
+            await send_waterguru_report()
+        else:
+            logger.debug(f"WaterGuru poll: no change ({current})")
+
+    except Exception as e:
+        logger.error(f"WaterGuru poll error: {e}")
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -934,10 +906,6 @@ def main():
     # Write initial health file
     with open(HEALTH_FILE, "w") as f:
         f.write(datetime.now().isoformat())
-
-    # Start webhook server in background thread
-    webhook_thread = threading.Thread(target=run_webhook_server, daemon=True)
-    webhook_thread.start()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     telegram_bot = app.bot
@@ -968,6 +936,7 @@ def main():
             logger.error(f"Startup notification error: {e}")
 
     app.job_queue.run_repeating(heartbeat, interval=30, first=10)
+    app.job_queue.run_repeating(waterguru_poll, interval=1800, first=60)
     app.job_queue.run_once(startup_notify, when=2)
 
     logger.info("Bot is running. Press Ctrl+C to stop.")
