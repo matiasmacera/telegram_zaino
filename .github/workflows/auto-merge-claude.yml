@@ -1,12 +1,12 @@
-name: Auto-merge Claude PRs
+name: Auto-merge Claude branches
 
 on:
-  pull_request:
-    types: [opened, synchronize]
+  push:
+    branches:
+      - 'claude/**'
 
 jobs:
   auto-merge:
-    if: startsWith(github.head_ref, 'claude/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -16,7 +16,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Merge PR
-        run: gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch
+      - name: Create and merge PR
+        run: |
+          # Check if PR already exists for this branch
+          PR_NUMBER=$(gh pr list --head "$GITHUB_REF_NAME" --json number -q '.[0].number' 2>/dev/null || echo "")
+
+          if [ -z "$PR_NUMBER" ]; then
+            # Create PR using last commit message as title
+            gh pr create \
+              --title "$(git log -1 --pretty=%s)" \
+              --body "Auto-merge from Claude Code branch \`$GITHUB_REF_NAME\`" \
+              --base main \
+              --head "$GITHUB_REF_NAME"
+            PR_NUMBER=$(gh pr list --head "$GITHUB_REF_NAME" --json number -q '.[0].number')
+          fi
+
+          # Merge with squash and delete the branch
+          gh pr merge "$PR_NUMBER" --squash --delete-branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
