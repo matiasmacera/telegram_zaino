@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 COPY VERSION .
-COPY CHANGELOG.md .
+COPY system_prompt.txt .
 COPY .git .git
 
 CMD ["python", "-u", "bot.py"]
