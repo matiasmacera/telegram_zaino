@@ -4,7 +4,7 @@
 
 set -e
 
-REPO_DIR="$HOME/zaino-telegram-bot"
+REPO_DIR="$HOME/Apps Zaino/telegram_zaino"
 
 echo "🏠 Zaino Telegram Bot - Setup"
 echo ""
@@ -55,7 +55,7 @@ echo "⏰ Configurando cron (cada 5 minutos)..."
 CRON_JOB="*/5 * * * * $REPO_DIR/update.sh"
 
 # Add to crontab if not already there
-(crontab -l 2>/dev/null | grep -v "zaino-telegram-bot/update.sh"; echo "$CRON_JOB") | crontab -
+(crontab -l 2>/dev/null | grep -v "telegram_zaino/update.sh"; echo "$CRON_JOB") | crontab -
 
 echo ""
 echo "✅ Setup completo!"

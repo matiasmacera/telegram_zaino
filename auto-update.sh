@@ -3,7 +3,7 @@
 # The bot creates /trigger/update file when /update command is received
 # This script detects it, does git pull + rebuild
 
-REPO_DIR="$HOME/zaino-telegram-bot"
+REPO_DIR="$HOME/Apps Zaino/telegram_zaino"
 TRIGGER_DIR="$REPO_DIR/.trigger"
 TRIGGER_FILE="$TRIGGER_DIR/update"
 LOG_FILE="$REPO_DIR/update.log"
