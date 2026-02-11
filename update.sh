@@ -3,7 +3,7 @@
 # Runs via cron every 5 minutes
 # Only rebuilds if there are actual changes from git
 
-REPO_DIR="$HOME/zaino-telegram-bot"
+REPO_DIR="$HOME/Apps Zaino/telegram_zaino"
 LOG_FILE="$REPO_DIR/update.log"
 
 cd "$REPO_DIR" || exit 1
