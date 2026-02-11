@@ -7,7 +7,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 COPY VERSION .
-COPY CHANGELOG.md .
-COPY git_info.txt .
+COPY system_prompt.txt .
+
+# Git info for /version command - passed by update scripts, fallback for fresh builds
+ARG GIT_INFO="fresh build - no git info available"
+RUN printf '%s\n' "$GIT_INFO" > git_info.txt
 
 CMD ["python", "-u", "bot.py"]

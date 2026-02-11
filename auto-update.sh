@@ -23,9 +23,10 @@ while true; do
         git pull origin main --quiet >> "$LOG_FILE" 2>&1
 
         # Rebuild and restart
+        GIT_INFO=$(git log --oneline -5)
         echo "$(date): Rebuilding..." >> "$LOG_FILE"
         docker compose down >> "$LOG_FILE" 2>&1
-        docker compose build --no-cache >> "$LOG_FILE" 2>&1
+        docker compose build --no-cache --build-arg "GIT_INFO=$GIT_INFO" >> "$LOG_FILE" 2>&1
         docker compose up -d >> "$LOG_FILE" 2>&1
         echo "$(date): Update complete" >> "$LOG_FILE"
         echo "---" >> "$LOG_FILE"
