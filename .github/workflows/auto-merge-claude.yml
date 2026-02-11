@@ -13,12 +13,10 @@ jobs:
       pull-requests: write
 
     steps:
-      - name: Auto-approve
-        uses: hmarr/auto-approve-action@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Auto-merge
-        uses: pascalgn/automerge-action@v0.16.4
+      - name: Merge PR
+        run: gh pr merge ${{ github.event.pull_request.number }} --squash --delete-branch
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MERGE_METHOD: squash
-          MERGE_DELETE_BRANCH: true
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
