@@ -6,12 +6,15 @@ Features:
 """
 
 import os
+import sys
 import json
+import signal
 import logging
 import tempfile
 import asyncio
 import functools
 from datetime import datetime, timedelta
+from time import time as monotime
 
 import httpx
 from telegram import Update, Bot
@@ -24,6 +27,15 @@ from telegram.ext import (
 )
 from anthropic import AsyncAnthropic
 
+# ─── Config Validation ────────────────────────────────────────────────────────
+
+REQUIRED_ENV = ["ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_ID", "HA_TOKEN"]
+_missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+if _missing:
+    print(f"ERROR: Faltan variables de entorno requeridas: {', '.join(_missing)}", file=sys.stderr)
+    print("Revisá tu archivo .env o docker-compose.yml", file=sys.stderr)
+    sys.exit(1)
+
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -34,10 +46,15 @@ HA_TOKEN = os.environ["HA_TOKEN"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
-HEALTH_FILE = "/tmp/bot_healthy"
-WATERGURU_LAST_FILE = "/tmp/waterguru_last"
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+WATERGURU_POLL_INTERVAL = int(os.environ.get("WATERGURU_POLL_INTERVAL", "1800"))
+RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "3"))
+HEALTH_FILE = os.path.join(DATA_DIR, "bot_healthy")
+WATERGURU_LAST_FILE = os.path.join(DATA_DIR, "waterguru_last")
 HA_TOKEN_FILE = os.path.join(TRIGGER_DIR, "ha_token")
 PREV_VERSION_FILE = os.path.join(TRIGGER_DIR, "prev_version")
+
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # Load version
 try:
@@ -56,6 +73,9 @@ try:
 except FileNotFoundError:
     pass
 MAX_CONVERSATION_MESSAGES = 20
+
+# Rate limiting state
+_last_message_time: dict[int, float] = {}
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -363,173 +383,14 @@ TOOLS = [
 
 # ─── System Prompt ────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """Sos el asistente inteligente de la casa de Matías en Zaino 785, Pilar.
-Controlás Home Assistant a través de herramientas.
-
-La casa tiene:
-- 92 luces (domótica cableada + Shelly + Ring)
-- 29 climatizadores (Sensibo controlando aires por IR)
-- 33 cortinas/covers motorizadas (blackouts, persianas, sombrillas)
-- 33 cámaras Ring
-- 3 cerraduras smart (Servicio, Pileta, Entrada)
-- 3 robots aspiradora (Saros Z70, Roborock S7 MaxV, Doris)
-- 18+ parlantes Sonos + HomePods
-- Generador Generac
-- Alarma
-- Pileta con filtrado y llenado automático
-- Apple TVs, Samsung The Frame, PlayStation 5
-- 2 Home Assistant Voice (Escritorio y Quincho)
-
-=== SKILL: PILETA ===
-La pileta tiene MUCHOS sensores y controles. Cuando el usuario pregunte por la pileta, 
-consultá TODAS las entidades relevantes para dar un reporte completo.
-
-SENSORES DE AGUA (WaterGuru):
-- sensor.waterguru_water_temperature → Temperatura del agua
-- sensor.waterguru_ph → pH (ideal: 7.2-7.6). Tiene advice en atributos
-- sensor.waterguru_ph_alert → Estado del pH (Ok/LOW/HIGH)
-- sensor.waterguru_free_chlorine → Cloro libre (ideal: 1-3 ppm). Tiene advice
-- sensor.waterguru_free_chlorine_alert → Estado cloro
-- sensor.waterguru_total_alkalinity → Alcalinidad total (ideal: 80-120 ppm)
-- sensor.waterguru_total_alkalinity_alert → Estado alcalinidad
-- sensor.waterguru_calcium_hardness → Dureza cálcica
-- sensor.waterguru_calcium_hardness_alert → Estado dureza
-- sensor.waterguru_cyanuric_acid_stabilizer → Ácido cianúrico (estabilizador)
-- sensor.waterguru_cyanuric_acid_stabilizer_alert → Estado estabilizador
-- sensor.waterguru_total_hardness → Dureza total
-- sensor.waterguru_skimmer_flow → Flujo del skimmer (gpm)
-- sensor.waterguru_status → Estado general (GREEN/YELLOW/RED)
-- sensor.waterguru_battery → Batería WaterGuru
-- sensor.waterguru_cassette_days_remaining → Días restantes del cassette
-- sensor.waterguru_cassette_remaining → % restante cassette
-- sensor.waterguru_last_measurement → Última medición
-
-MONITOR PILETA (segundo sensor):
-- sensor.monitor_pileta_temperature → Temperatura (otro sensor)
-- sensor.monitor_pileta_total_dissolved_solids → TDS (ppm)
-- sensor.monitor_pileta_battery → Batería monitor
-
-CLIMATIZADOR:
-- climate.climatizador_pileta → Calefacción de pileta (current_temp, target_temp)
-
-FILTRADO Y LLENADO (Shelly switches):
-- switch.filtrado → Bomba de filtrado (on/off)
-- switch.llenado → Llenado de agua (on/off)
-- sensor.filtrado_power → Consumo actual filtrado (W)
-- sensor.filtrado_energy → Energía acumulada filtrado (kWh)
-- sensor.llenado_power → Consumo actual llenado (W)
-- sensor.llenado_energy → Energía acumulada llenado (kWh)
-- binary_sensor.filtrado_overcurrent → Alerta sobrecorriente
-- binary_sensor.llenado_overcurrent → Alerta sobrecorriente
-
-ILUMINACIÓN PILETA:
-- light.shellyplusrgbwpm_2cbcbbc14718 → Pileta RGB (RGBW, colores)
-- light.exterior_exterior_reflectores_pileta → Reflectores Pileta
-- light.exterior_exterior_solado_pileta → Solado Pileta
-- light.exterior_exterior_canteros_pileta → Canteros Pileta
-
-COVERS/SOMBRILLAS:
-- cover.sombrillas → Grupo: 3 sombrillas (gris 1, gris 2, roja)
-- cover.sombrilla_gris_1, cover.sombrilla_gris_2, cover.sombrilla_roja
-- cover.cortinas_pileta → Grupo: cortinas zona pileta
-
-SEGURIDAD PILETA:
-- lock.pileta → Cerradura lateral pileta (batería: sensor.pileta_battery)
-- binary_sensor.reja_jardin_pileta → Reja jardín-pileta (abierta/cerrada)
-- binary_sensor.reja_pileta_lateral → Reja pileta lateral
-- binary_sensor.puerta_bano_pileta → Puerta baño pileta
-
-SONOS PILETA:
-- media_player.pileta → Sonos Pileta
-
-RIEGO ZONA PILETA:
-- switch.canteros_pileta_y_galeria → Riego canteros pileta
-- switch.fondo_y_cantero_derecho_pileta → Riego fondo pileta
-
-Cuando el usuario pida estado de la pileta, hacé un reporte completo con:
-1. Temperatura agua (ambos sensores) y climatizador
-2. Química: pH, cloro, alcalinidad, estabilizador, dureza + alertas/consejos del WaterGuru
-3. Estado filtrado/llenado + consumo
-4. Estado WaterGuru (cassette, batería)
-5. Luces y sombrillas si es relevante
-6. Seguridad (rejas, cerradura, puerta) si es relevante
-
-Usá emojis para hacerlo visual: 🌡️ 🧪 💧 ⚗️ 🔬 💡 ☂️ 🔒
-
-=== SKILL: MÚSICA / SONOS ===
-La casa tiene 18 parlantes Sonos + HomePod + Apple TVs + TVs.
-
-PARLANTES SONOS (entity_id → nombre, volumen habitual):
-- media_player.estar → Estar (0.14) - surround con Sub y Rear
-- media_player.estar_300 → Estar 300 (0.4)
-- media_player.living → Living (0.31)
-- media_player.living_lampara → Entrada (0.76)
-- media_player.cocina → Cocina (0.18)
-- media_player.escritorio → Escritorio (0.08) - surround
-- media_player.escritorio_cuadro → Escritorio Cuadro (0.39)
-- media_player.quincho → Quincho (0.19)
-- media_player.playroom → Playroom (0.39)
-- media_player.pileta → Pileta (0.67) - surround
-- media_player.terraza → Terraza (0.18) - surround
-- media_player.galeria_mesa → Galería Mesa (0.33)
-- media_player.galeria_estar → Galería Estar (0.34)
-- media_player.vestidor → Vestidor (0.22)
-- media_player.huespedes → Huéspedes (0.19)
-- media_player.bano_suite → Baño Suite (0.03)
-- media_player.casita_del_arbol → Casita Juegos (0.49)
-
-OTROS:
-- media_player.estar_pa → HomePod Mini Estar PA
-- media_player.atv_quincho / atv_escritorio / atv_huespedes → Apple TVs
-- media_player.samsung_the_frame_65_qn65ls03aagc → Samsung The Frame
-- media_player.tv_playroom → TV LG Playroom
-- media_player.playstation_5 → PlayStation 5
-
-SERVICIOS CLAVE (usar con call_service domain="media_player"):
-- volume_set: data={"entity_id": "...", "volume_level": 0.0-1.0}
-- volume_up / volume_down: data={"entity_id": "..."}
-- media_play / media_pause / media_play_pause: data={"entity_id": "..."}
-- media_next_track / media_previous_track: data={"entity_id": "..."}
-- play_media: data={"entity_id": "...", "media_content_id": "URL_O_URI", "media_content_type": "music"}
-- join: data={"entity_id": "speaker_principal", "group_members": ["sp1", "sp2", ...]}
-  → Agrupa parlantes en multiroom. El entity_id es el coordinador.
-- unjoin: data={"entity_id": "..."} → Desagrupa
-- shuffle_set: data={"entity_id": "...", "shuffle": true/false}
-- repeat_set: data={"entity_id": "...", "repeat": "off"/"one"/"all"}
-- select_source: data={"entity_id": "...", "source": "TV"/"Line-in"}
-
-SERVICIOS SONOS (domain="sonos"):
-- set_sleep_timer: data={"entity_id": "...", "sleep_time": minutos}
-- clear_sleep_timer: data={"entity_id": "..."}
-- snapshot / restore: guardar/restaurar estado
-
-ZONAS LÓGICAS para agrupar multiroom:
-- Exterior: pileta, terraza, galeria_mesa, galeria_estar, casita_del_arbol
-- Planta baja: estar, living, cocina, living_lampara (entrada), estar_300
-- Suite: escritorio, escritorio_cuadro, vestidor, bano_suite
-- Quincho: quincho
-- Dormitorios: playroom, huespedes
-
-COMPORTAMIENTO:
-- "Poné música en X" sin especificar qué → preguntale qué quiere escuchar o sugerí algo
-- "Poné X en Y" → usá play_media en el parlante Y
-- "Música en toda la casa" / "en todos lados" → agrupá todos los Sonos con join
-- "Música afuera" → agrupá zona Exterior
-- "Bajá/subí el volumen de X" → volume_set
-- "¿Qué suena?" → consultá estado de todos los media_players, mostrá los que estén playing
-- "Pará la música" → media_pause en los que estén playing
-- "Siguiente canción" → media_next_track
-- Volumen: siempre entre 0.0 y 1.0 (0.5 = 50%)
-
-=== FIN SKILLS ===
-
-Respondé siempre en español rioplatense, de forma concisa y directa.
-Cuando controles dispositivos, confirmá la acción brevemente.
-Si no estás seguro de un entity_id, usá search_entities primero.
-Podés ejecutar múltiples tools en secuencia si es necesario.
-
-AUDIO: Los mensajes de voz del usuario ya fueron transcritos a texto, procesalos normalmente.
-"""
+SYSTEM_PROMPT_FILE = os.environ.get("SYSTEM_PROMPT_FILE", "system_prompt.txt")
+try:
+    with open(SYSTEM_PROMPT_FILE, "r") as f:
+        SYSTEM_PROMPT = f.read().strip()
+    logger.info(f"System prompt loaded from {SYSTEM_PROMPT_FILE}")
+except FileNotFoundError:
+    logger.error(f"System prompt file not found: {SYSTEM_PROMPT_FILE}")
+    sys.exit(1)
 
 
 # ─── Claude Integration ──────────────────────────────────────────────────────
@@ -540,7 +401,9 @@ async def process_tool_call(tool_name: str, tool_input: dict) -> str:
     if not func:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
     try:
-        return await func(**tool_input)
+        result = await func(**tool_input)
+        logger.info(f"Tool {tool_name} result: {result[:200]}{'...' if len(result) > 200 else ''}")
+        return result
     except Exception as e:
         logger.error(f"Tool {tool_name} error: {e}")
         return json.dumps({"error": str(e)})
@@ -551,12 +414,15 @@ async def chat_with_claude(user_id: int, message: str) -> str:
     messages = get_conversation(user_id)
 
     try:
-        response = await claude.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=2048,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
+        response = await asyncio.wait_for(
+            claude.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=2048,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            ),
+            timeout=120,
         )
 
         max_iterations = 10
@@ -580,12 +446,15 @@ async def chat_with_claude(user_id: int, message: str) -> str:
 
             add_message(user_id, "user", tool_results)
 
-            response = await claude.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=2048,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
-                messages=get_conversation(user_id),
+            response = await asyncio.wait_for(
+                claude.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=2048,
+                    system=SYSTEM_PROMPT,
+                    tools=TOOLS,
+                    messages=get_conversation(user_id),
+                ),
+                timeout=120,
             )
 
         final_text = ""
@@ -596,9 +465,12 @@ async def chat_with_claude(user_id: int, message: str) -> str:
         add_message(user_id, "assistant", response.content)
         return final_text or "✅ Listo"
 
+    except asyncio.TimeoutError:
+        logger.error("Claude API timeout (120s)")
+        return "⏱ Claude tardó demasiado en responder. Intentá de nuevo."
     except Exception as e:
         logger.error(f"Claude error: {e}")
-        return f"❌ Error: {str(e)}"
+        return "⚠️ Hubo un problema procesando tu mensaje. Intentá de nuevo en unos segundos."
 
 
 # ─── Telegram Handlers ───────────────────────────────────────────────────────
@@ -623,7 +495,11 @@ async def run_with_typing(update, coro):
         return result
     finally:
         stop_event.set()
-        await typing_task
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
 
 
 def authorized(func):
@@ -649,6 +525,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🎤 _Mandá un audio pidiendo lo que quieras_\n\n"
         "Comandos:\n"
         "/reset - Limpiar conversación\n"
+        "/history - Ver historial de conversación\n"
         "/status - Estado general de la casa\n"
         "/pileta - Estado completo de la pileta\n"
         "/musica - ¿Qué suena en la casa?\n"
@@ -680,8 +557,14 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         os.makedirs(TRIGGER_DIR, exist_ok=True)
         trigger_file = os.path.join(TRIGGER_DIR, "update")
+        # Save who requested the update for post-update notification
+        update_info = {
+            "time": datetime.now().isoformat(),
+            "version": BOT_VERSION,
+            "user_id": update.effective_user.id,
+        }
         with open(trigger_file, "w") as f:
-            f.write(datetime.now().isoformat())
+            json.dump(update_info, f)
         await update.message.reply_text(
             "🔄 Update disparado. El bot se va a reiniciar en unos segundos con la última versión del repo."
         )
@@ -818,8 +701,54 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @authorized
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current conversation history summary."""
+    user_id = update.effective_user.id
+    conv = get_conversation(user_id)
+    if not conv:
+        await update.message.reply_text("No hay conversación activa. Mandame un mensaje para empezar.")
+        return
+
+    lines = [f"*Conversación activa:* {len(conv)} mensajes\n"]
+    for i, msg in enumerate(conv):
+        role = msg["role"]
+        content = msg["content"]
+        if role == "user":
+            if isinstance(content, str):
+                preview = content[:80] + ("..." if len(content) > 80 else "")
+                lines.append(f"`{i+1}.` Tu: _{preview}_")
+            elif isinstance(content, list):
+                lines.append(f"`{i+1}.` Tu: (resultado de tool)")
+        elif role == "assistant":
+            if isinstance(content, list):
+                texts = [b.text for b in content if hasattr(b, "text")]
+                tools = [b.name for b in content if hasattr(b, "name")]
+                if texts:
+                    preview = texts[0][:80] + ("..." if len(texts[0]) > 80 else "")
+                    lines.append(f"`{i+1}.` Bot: _{preview}_")
+                if tools:
+                    lines.append(f"      Tools: {', '.join(tools)}")
+            elif isinstance(content, str):
+                preview = content[:80] + ("..." if len(content) > 80 else "")
+                lines.append(f"`{i+1}.` Bot: _{preview}_")
+
+    text = "\n".join(lines)
+    try:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(text.replace("*", "").replace("_", "").replace("`", ""))
+
+
+@authorized
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    response = await run_with_typing(update, chat_with_claude(update.effective_user.id, update.message.text))
+    user_id = update.effective_user.id
+    now = monotime()
+    last = _last_message_time.get(user_id, 0)
+    if now - last < RATE_LIMIT_SECONDS:
+        return
+    _last_message_time[user_id] = now
+
+    response = await run_with_typing(update, chat_with_claude(user_id, update.message.text))
     await send_long_message(update, response)
 
 
@@ -852,9 +781,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = await run_with_typing(update, chat_with_claude(update.effective_user.id, transcribed_text))
         await send_long_message(update, response)
 
+    except httpx.TimeoutException:
+        logger.error("Voice transcription timeout")
+        await update.message.reply_text("⏱ El audio tardó demasiado en transcribir. Probá con uno más corto.")
     except Exception as e:
         logger.error(f"Voice error: {e}")
-        await update.message.reply_text(f"❌ Error procesando audio: {e}")
+        await update.message.reply_text("⚠️ No pude procesar el audio. Intentá de nuevo.")
     finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
@@ -1088,13 +1020,17 @@ def main():
     app.add_handler(CommandHandler("musica", cmd_musica))
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("version", cmd_version))
+    app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
 
     # Health heartbeat: update file every 30s so Docker knows we're alive
     async def heartbeat(context: ContextTypes.DEFAULT_TYPE):
-        with open(HEALTH_FILE, "w") as f:
-            f.write(datetime.now().isoformat())
+        try:
+            with open(HEALTH_FILE, "w") as f:
+                f.write(datetime.now().isoformat())
+        except Exception as e:
+            logger.error(f"Heartbeat write error: {e}")
 
     # Send startup notification with version info
     async def startup_notify(context: ContextTypes.DEFAULT_TYPE):
@@ -1130,8 +1066,15 @@ def main():
             logger.error(f"Startup notification error: {e}")
 
     app.job_queue.run_repeating(heartbeat, interval=30, first=10)
-    app.job_queue.run_repeating(waterguru_poll, interval=1800, first=60)
+    app.job_queue.run_repeating(waterguru_poll, interval=WATERGURU_POLL_INTERVAL, first=60)
     app.job_queue.run_once(startup_notify, when=2)
+
+    # Graceful shutdown handler
+    def graceful_shutdown(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, graceful_shutdown)
 
     logger.info("Bot is running. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

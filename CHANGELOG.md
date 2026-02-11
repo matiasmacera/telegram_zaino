@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.10.0 — 2026-02-11
+- **System prompt externalizado** a `system_prompt.txt` (datos personales fuera del código)
+- **Almacenamiento persistente**: health check y WaterGuru state en volumen Docker (`/data`) en vez de `/tmp`
+- **Validación de config al inicio**: error claro si faltan variables de entorno requeridas
+- **Rate limiting**: protección contra spam de mensajes (configurable via `RATE_LIMIT_SECONDS`)
+- **Timeout en Claude API**: 120s por llamada, con mensaje amigable si se excede
+- **Comando `/history`**: ver el historial de conversación actual
+- **Health check optimizado**: reemplazado Python subprocess por shell nativo
+- **Graceful shutdown**: manejo de SIGTERM para cierre limpio del bot
+- **Logging de tools**: se loguean resultados de herramientas (truncados a 200 chars)
+- **Mensajes de error amigables**: errores de Claude y voz sin tracebacks técnicos
+- **WaterGuru configurable**: intervalo de polling via `WATERGURU_POLL_INTERVAL`
+- **`.dockerignore`**: excluye `.git`, logs y archivos innecesarios del image
+- **Fix**: typing task cleanup mejorado (cancel en vez de await)
+- **Fix**: paths corregidos en scripts de auto-update (`auto-update.sh`, `update.sh`, `setup.sh`)
+
 ## v0.9.1 — 2025-02-11
 - Test: bump de versión para verificar flujo de actualización
 - El bot ahora notifica `v0.9.0 → v0.9.1` al reiniciar tras `/update`

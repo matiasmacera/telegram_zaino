@@ -7,8 +7,9 @@ services:
       - .env
     volumes:
       - ./.trigger:/trigger
+      - bot-data:/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import os,time; assert time.time() - os.path.getmtime('/tmp/bot_healthy') < 120"]
+      test: ["CMD", "sh", "-c", "[ $(( $(date +%s) - $(stat -c %Y /data/bot_healthy 2>/dev/null || echo 0) )) -lt 120 ]"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -18,3 +19,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  bot-data:

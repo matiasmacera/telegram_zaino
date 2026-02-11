@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+.env.example
+.trigger/
+*.log
+*.md
+*.sh
+__pycache__/
+*.pyc
