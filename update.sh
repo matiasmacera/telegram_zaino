@@ -25,6 +25,9 @@ echo "$(date): Update detected ($LOCAL -> $REMOTE)" >> "$LOG_FILE"
 
 git pull origin main --quiet >> "$LOG_FILE" 2>&1
 
+# Generate git info for the container (avoids copying .git into Docker image)
+git log --oneline -5 > git_info.txt
+
 echo "$(date): Rebuilding container..." >> "$LOG_FILE"
 docker compose down >> "$LOG_FILE" 2>&1
 docker compose build --no-cache >> "$LOG_FILE" 2>&1
