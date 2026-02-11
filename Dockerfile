@@ -8,6 +8,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
+COPY VERSION .
+COPY CHANGELOG.md .
 COPY .git .git
 
 CMD ["python", "-u", "bot.py"]

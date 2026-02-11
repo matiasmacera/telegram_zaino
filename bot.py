@@ -37,6 +37,14 @@ TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
 HEALTH_FILE = "/tmp/bot_healthy"
 WATERGURU_LAST_FILE = "/tmp/waterguru_last"
 HA_TOKEN_FILE = os.path.join(TRIGGER_DIR, "ha_token")
+PREV_VERSION_FILE = os.path.join(TRIGGER_DIR, "prev_version")
+
+# Load version
+try:
+    with open("VERSION", "r") as f:
+        BOT_VERSION = f.read().strip()
+except FileNotFoundError:
+    BOT_VERSION = "unknown"
 
 # Use persisted token from volume if available (set via /settoken)
 try:
@@ -802,7 +810,7 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
         start_time = datetime.now() - timedelta(seconds=uptime_seconds)
 
         text = (
-            f"🤖 *Zaino Bot*\n\n"
+            f"🤖 *Zaino Bot v{BOT_VERSION}*\n\n"
             f"⏱ Uptime: {hours}h {minutes}m\n"
             f"🕐 Inicio: {start_time.strftime('%d/%m %H:%M')}\n\n"
             f"📦 Últimos commits:\n```\n{git_info}\n```"
@@ -1065,7 +1073,7 @@ async def waterguru_poll(context):
 
 def main():
     global telegram_bot
-    logger.info("Starting Zaino Home Assistant Bot...")
+    logger.info(f"Starting Zaino Home Assistant Bot v{BOT_VERSION}...")
 
     # Write initial health file
     with open(HEALTH_FILE, "w") as f:
@@ -1091,12 +1099,34 @@ def main():
         with open(HEALTH_FILE, "w") as f:
             f.write(datetime.now().isoformat())
 
-    # Send startup notification
+    # Send startup notification with version info
     async def startup_notify(context: ContextTypes.DEFAULT_TYPE):
         try:
+            # Check if there was a previous version (update scenario)
+            prev_version = None
+            try:
+                with open(PREV_VERSION_FILE, "r") as f:
+                    prev_version = f.read().strip()
+            except FileNotFoundError:
+                pass
+
+            # Save current version for next restart
+            os.makedirs(TRIGGER_DIR, exist_ok=True)
+            with open(PREV_VERSION_FILE, "w") as f:
+                f.write(BOT_VERSION)
+
+            if prev_version and prev_version != BOT_VERSION:
+                text = (
+                    f"🔄 *Zaino Bot actualizado*\n"
+                    f"v{prev_version} → v{BOT_VERSION}\n\n"
+                    f"Conectado y listo."
+                )
+            else:
+                text = f"✅ *Zaino Bot v{BOT_VERSION} iniciado*\nConectado y listo."
+
             await context.bot.send_message(
                 chat_id=TELEGRAM_USER_ID,
-                text="✅ *Zaino Bot iniciado*\nConectado y listo.",
+                text=text,
                 parse_mode="Markdown",
             )
         except Exception as e:
