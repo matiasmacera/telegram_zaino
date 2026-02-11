@@ -105,8 +105,9 @@ check_update_trigger() {
         cd "$REPO_DIR"
         git pull origin main >> "$LOG_FILE" 2>&1
 
+        GIT_INFO=$(git log --oneline -5)
         docker compose down >> "$LOG_FILE" 2>&1
-        docker compose build >> "$LOG_FILE" 2>&1
+        docker compose build --build-arg "GIT_INFO=$GIT_INFO" >> "$LOG_FILE" 2>&1
         docker compose up -d >> "$LOG_FILE" 2>&1
 
         log "UPDATE: Complete"

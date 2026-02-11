@@ -650,9 +650,7 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         # Fallback: read from docker logs via internal log
         if not result.stdout.strip():
-            # Use logging records
             lines = []
-            log_handler = None
             for h in logging.getLogger().handlers:
                 if hasattr(h, 'stream'):
                     lines.append("(logs only available via docker logs)")
