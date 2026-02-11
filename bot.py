@@ -10,6 +10,7 @@ import json
 import logging
 import tempfile
 import asyncio
+import functools
 from datetime import datetime, timedelta
 
 import httpx
@@ -208,12 +209,16 @@ async def tool_control_entity(entity_id: str, action: str, params: dict = None) 
     if params:
         data.update(params)
 
-    await ha_post(f"services/{domain}/{service}", data)
+    result = await ha_post(f"services/{domain}/{service}", data)
+    if isinstance(result, dict) and "error" in result:
+        return json.dumps(result)
     return json.dumps({"status": "ok", "service": f"{domain}.{service}", "entity": entity_id, "params": params}, ensure_ascii=False)
 
 
 async def tool_call_service(domain: str, service: str, data: dict = None) -> str:
-    await ha_post(f"services/{domain}/{service}", data or {})
+    result = await ha_post(f"services/{domain}/{service}", data or {})
+    if isinstance(result, dict) and "error" in result:
+        return json.dumps(result)
     return json.dumps({"status": "ok", "domain": domain, "service": service}, ensure_ascii=False)
 
 
@@ -603,6 +608,7 @@ async def run_with_typing(update, coro):
 
 
 def authorized(func):
+    @functools.wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != TELEGRAM_USER_ID:
             await update.message.reply_text("⛔ No autorizado.")
@@ -765,6 +771,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action("typing")
 
+    temp_path = None
     try:
         voice_file = await update.message.voice.get_file()
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
@@ -772,13 +779,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             temp_path = f.name
 
         transcribed_text = await transcribe_voice(temp_path)
-        os.unlink(temp_path)
 
         if not transcribed_text or transcribed_text.startswith("[Error"):
             await update.message.reply_text(f"❌ No pude transcribir el audio: {transcribed_text}")
             return
 
-        await update.message.reply_text(f"🎤 _{transcribed_text}_", parse_mode="Markdown")
+        try:
+            await update.message.reply_text(f"🎤 _{transcribed_text}_", parse_mode="Markdown")
+        except Exception:
+            await update.message.reply_text(f"🎤 {transcribed_text}")
 
         response = await run_with_typing(update, chat_with_claude(update.effective_user.id, transcribed_text))
         await send_long_message(update, response)
@@ -786,6 +795,9 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Voice error: {e}")
         await update.message.reply_text(f"❌ Error procesando audio: {e}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 async def send_long_message(update: Update, text: str):
