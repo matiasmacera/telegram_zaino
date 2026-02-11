@@ -3,5 +3,6 @@
 update.log
 updater.log
 updater-error.log
+monitor.log
 __pycache__/
 *.pyc

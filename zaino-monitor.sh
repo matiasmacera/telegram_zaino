@@ -8,24 +8,30 @@
 # ============================================================
 
 # === CONFIG ===
-HA_URL="http://192.168.99.232:8123"
 VM_NAME="Home Assistant"
 MAX_RETRIES=3
 RETRY_DELAY=30
 
-REPO_DIR="$HOME/zaino-telegram-bot"
+REPO_DIR="$HOME/Apps Zaino/telegram_zaino"
 CONTAINER_NAME="zaino-telegram-bot"
 TRIGGER_FILE="$REPO_DIR/.trigger/update"
 
-LOG_FILE="$HOME/zaino-monitor/monitor.log"
+LOG_FILE="$HOME/Apps Zaino/zaino-monitor/monitor.log"
+LAST_CHECK_FILE="$HOME/Apps Zaino/zaino-monitor/.last_check"
 UTMCTL="/Applications/UTM.app/Contents/MacOS/utmctl"
 
-# Telegram (Zaino bot)
-TELEGRAM_BOT_TOKEN="8522322427:AAGySbfSObmAJeG0F-a40OKXsRZAwsljJ9Y"
-TELEGRAM_CHAT_ID="288671506"
+# Load credentials from .env
+if [[ -f "$REPO_DIR/.env" ]]; then
+    export $(grep -E '^(TELEGRAM_BOT_TOKEN|TELEGRAM_USER_ID|HA_URL|HA_TOKEN)=' "$REPO_DIR/.env" | xargs)
+    TELEGRAM_CHAT_ID="$TELEGRAM_USER_ID"
+    HA_URL="${HA_URL:-http://192.168.99.232:8123}"
+else
+    echo "ERROR: .env not found at $REPO_DIR/.env" >&2
+    exit 1
+fi
 
 # === SETUP ===
-mkdir -p "$HOME/zaino-monitor"
+mkdir -p "$HOME/Apps Zaino/zaino-monitor"
 mkdir -p "$REPO_DIR/.trigger"
 
 # === FUNCTIONS ===
@@ -116,7 +122,7 @@ while true; do
 
     # 2. Every 3 minutes: check HAOS + Docker
     CURRENT_TIME=$(date +%s)
-    LAST_CHECK_FILE="$HOME/zaino-monitor/.last_check"
+    # LAST_CHECK_FILE is set in CONFIG above
 
     if [[ -f "$LAST_CHECK_FILE" ]]; then
         LAST_CHECK=$(cat "$LAST_CHECK_FILE")
