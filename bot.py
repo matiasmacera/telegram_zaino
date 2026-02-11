@@ -36,6 +36,17 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
 HEALTH_FILE = "/tmp/bot_healthy"
 WATERGURU_LAST_FILE = "/tmp/waterguru_last"
+HA_TOKEN_FILE = os.path.join(TRIGGER_DIR, "ha_token")
+
+# Use persisted token from volume if available (set via /settoken)
+try:
+    with open(HA_TOKEN_FILE, "r") as f:
+        _saved_token = f.read().strip()
+    if _saved_token:
+        HA_TOKEN = _saved_token
+        logging.info("Using HA token from persisted file")
+except FileNotFoundError:
+    pass
 MAX_CONVERSATION_MESSAGES = 20
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -671,6 +682,50 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @authorized
+async def cmd_settoken(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Update HA token remotely. Usage: /settoken <new_token>"""
+    # Delete the message with the token for security
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    args = context.args
+    if not args:
+        await update.message.chat.send_message("Uso: `/settoken <nuevo_token_HA>`", parse_mode="Markdown")
+        return
+
+    new_token = args[0]
+
+    # Validate the new token against HA
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as test_client:
+            resp = await test_client.get(
+                f"{HA_URL}/api/config",
+                headers={"Authorization": f"Bearer {new_token}"},
+            )
+            resp.raise_for_status()
+    except Exception as e:
+        await update.message.chat.send_message(f"❌ Token inválido. HA respondió: {e}")
+        return
+
+    # Save to persistent volume
+    try:
+        os.makedirs(TRIGGER_DIR, exist_ok=True)
+        with open(HA_TOKEN_FILE, "w") as f:
+            f.write(new_token)
+    except Exception as e:
+        await update.message.chat.send_message(f"❌ No pude guardar el token: {e}")
+        return
+
+    # Update in-memory client
+    http_client.headers["Authorization"] = f"Bearer {new_token}"
+
+    await update.message.chat.send_message("✅ Token de Home Assistant actualizado y guardado. Funciona incluso después de reiniciar.")
+    logger.info("HA token updated via /settoken")
+
+
+@authorized
 async def cmd_pileta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = await run_with_typing(update, chat_with_claude(
         update.effective_user.id,
@@ -1023,6 +1078,7 @@ def main():
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("settoken", cmd_settoken))
     app.add_handler(CommandHandler("pileta", cmd_pileta))
     app.add_handler(CommandHandler("musica", cmd_musica))
     app.add_handler(CommandHandler("logs", cmd_logs))
