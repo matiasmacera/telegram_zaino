@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.9.1 — 2025-02-11
+- Test: bump de versión para verificar flujo de actualización
+- El bot ahora notifica `v0.9.0 → v0.9.1` al reiniciar tras `/update`
+
 ## v0.9.0 — 2025-02-11
 - CI: GitHub Action para auto-merge de PRs desde ramas `claude/*`
 - Refactor: `zaino-monitor.sh` lee credenciales del `.env` (sin más tokens hardcodeados)
