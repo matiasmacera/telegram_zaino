@@ -790,17 +790,14 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show current bot version and uptime."""
     try:
-        import subprocess
-        # Git commit
-        result = subprocess.run(
-            ["git", "log", "--oneline", "-5"],
-            capture_output=True, text=True, timeout=5,
-            cwd="/app" if os.path.exists("/app/.git") else "."
-        )
-        git_info = result.stdout.strip() if result.stdout else "Git info not available"
+        # Git info from file generated at build time
+        try:
+            with open("git_info.txt", "r") as f:
+                git_info = f.read().strip()
+        except FileNotFoundError:
+            git_info = "Git info not available"
 
         # Uptime
-        import time
         with open("/proc/uptime", "r") as f:
             uptime_seconds = float(f.read().split()[0])
         hours = int(uptime_seconds // 3600)

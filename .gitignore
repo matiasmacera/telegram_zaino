@@ -6,3 +6,4 @@ updater-error.log
 monitor.log
 __pycache__/
 *.pyc
+git_info.txt
