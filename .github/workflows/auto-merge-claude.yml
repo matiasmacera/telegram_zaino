@@ -42,3 +42,6 @@ jobs:
             git push origin main
             echo "Successfully synced $BRANCH to main"
           fi
+
+          # Delete the branch to keep the repo clean
+          git push origin --delete "$BRANCH" || true
