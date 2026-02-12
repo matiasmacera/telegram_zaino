@@ -107,16 +107,26 @@ http_client = httpx.AsyncClient(
     timeout=30.0,
 )
 
-# InfluxDB client (optional - for analytics)
-influx_client: InfluxDBClientAsync | None = None
-if INFLUXDB_TOKEN:
-    influx_client = InfluxDBClientAsync(
-        url=INFLUXDB_URL,
-        token=INFLUXDB_TOKEN,
-        org=INFLUXDB_ORG,
-    )
-    logger.info("InfluxDB client configured")
-else:
+# InfluxDB client (optional - for analytics, lazy-initialized)
+_influx_client: InfluxDBClientAsync | None = None
+
+
+def get_influx_client() -> InfluxDBClientAsync | None:
+    """Lazy-init InfluxDB async client (must be called inside async context)."""
+    global _influx_client
+    if not INFLUXDB_TOKEN:
+        return None
+    if _influx_client is None:
+        _influx_client = InfluxDBClientAsync(
+            url=INFLUXDB_URL,
+            token=INFLUXDB_TOKEN,
+            org=INFLUXDB_ORG,
+        )
+        logger.info("InfluxDB client initialized")
+    return _influx_client
+
+
+if not INFLUXDB_TOKEN:
     logger.warning("INFLUXDB_TOKEN not set — analytics features disabled")
 
 # ─── Conversation History ────────────────────────────────────────────────────
@@ -318,7 +328,7 @@ async def tool_get_ha_config() -> str:
 
 async def tool_query_entity_history(entity_id: str, days: int = 7) -> str:
     """Query long-term entity history from InfluxDB."""
-    if not influx_client:
+    if not get_influx_client():
         return json.dumps({"error": "InfluxDB no configurado. Agregá INFLUXDB_TOKEN en .env"})
 
     try:
@@ -330,7 +340,7 @@ async def tool_query_entity_history(entity_id: str, days: int = 7) -> str:
             " |> limit(n: 500)"
         )
 
-        query_api = influx_client.query_api()
+        query_api = get_influx_client().query_api()
         tables = await query_api.query(query, org=INFLUXDB_ORG)
 
         records = []
@@ -362,7 +372,7 @@ async def tool_query_entity_history(entity_id: str, days: int = 7) -> str:
 
 async def tool_query_entity_stats(entity_id: str, days: int = 30) -> str:
     """Get behavioral statistics for an entity: state distribution, hourly/daily patterns."""
-    if not influx_client:
+    if not get_influx_client():
         return json.dumps({"error": "InfluxDB no configurado. Agregá INFLUXDB_TOKEN en .env"})
 
     try:
@@ -373,7 +383,7 @@ async def tool_query_entity_stats(entity_id: str, days: int = 30) -> str:
             ' |> sort(columns: ["_time"])'
         )
 
-        query_api = influx_client.query_api()
+        query_api = get_influx_client().query_api()
         tables = await query_api.query(query, org=INFLUXDB_ORG)
 
         records = []
@@ -438,7 +448,7 @@ async def tool_query_entity_stats(entity_id: str, days: int = 30) -> str:
 
 async def tool_query_home_activity(hours: int = 24, domain: str = None) -> str:
     """Overview of home activity: most active entities, state changes by domain."""
-    if not influx_client:
+    if not get_influx_client():
         return json.dumps({"error": "InfluxDB no configurado. Agregá INFLUXDB_TOKEN en .env"})
 
     try:
@@ -457,7 +467,7 @@ async def tool_query_home_activity(hours: int = 24, domain: str = None) -> str:
             " |> limit(n: 50)"
         )
 
-        query_api = influx_client.query_api()
+        query_api = get_influx_client().query_api()
         tables = await query_api.query(query, org=INFLUXDB_ORG)
 
         entities = []
@@ -878,7 +888,7 @@ async def cmd_musica(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @authorized
 async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not influx_client:
+    if not get_influx_client():
         await update.message.reply_text("⚠️ InfluxDB no está configurado. Agregá INFLUXDB_TOKEN en .env")
         return
     response = await run_with_typing(update, chat_with_claude(
