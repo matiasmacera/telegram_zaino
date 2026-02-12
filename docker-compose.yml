@@ -4,6 +4,7 @@ services:
     container_name: zaino-telegram-bot
     restart: always
     env_file:
+      - .env.config
       - .env
     volumes:
       - ./.trigger:/trigger

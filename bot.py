@@ -33,16 +33,23 @@ REQUIRED_ENV = ["ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_USER_ID", "
 _missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
 if _missing:
     print(f"ERROR: Faltan variables de entorno requeridas: {', '.join(_missing)}", file=sys.stderr)
-    print("Revisá tu archivo .env o docker-compose.yml", file=sys.stderr)
+    print("Revisá tus archivos .env / .env.config o docker-compose.yml", file=sys.stderr)
     sys.exit(1)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_USER_ID = int(os.environ["TELEGRAM_USER_ID"])
+_raw_ids = [int(uid.strip()) for uid in os.environ["TELEGRAM_USER_ID"].split(",")]
+TELEGRAM_ADMIN_ID = _raw_ids[0]  # First ID = admin, receives WaterGuru notifications
+TELEGRAM_USER_IDS = set(_raw_ids)
 HA_URL = os.environ.get("HA_URL", "http://homeassistant.local:8123")
 HA_TOKEN = os.environ["HA_TOKEN"]
+USER_NAMES: dict[int, str] = {}
+for _pair in os.environ.get("TELEGRAM_USER_NAMES", "").split(","):
+    if ":" in _pair:
+        _uid, _name = _pair.strip().split(":", 1)
+        USER_NAMES[int(_uid)] = _name.strip()
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5-20250929")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
@@ -413,12 +420,19 @@ async def chat_with_claude(user_id: int, message: str) -> str:
     add_message(user_id, "user", message)
     messages = get_conversation(user_id)
 
+    # Build per-user system prompt with their name
+    user_name = USER_NAMES.get(user_id)
+    if user_name:
+        system_prompt = f"{SYSTEM_PROMPT}\n\nEstás hablando con {user_name}."
+    else:
+        system_prompt = SYSTEM_PROMPT
+
     try:
         response = await asyncio.wait_for(
             claude.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=2048,
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 tools=TOOLS,
                 messages=messages,
             ),
@@ -450,7 +464,7 @@ async def chat_with_claude(user_id: int, message: str) -> str:
                 claude.messages.create(
                     model=CLAUDE_MODEL,
                     max_tokens=2048,
-                    system=SYSTEM_PROMPT,
+                    system=system_prompt,
                     tools=TOOLS,
                     messages=get_conversation(user_id),
                 ),
@@ -505,10 +519,12 @@ async def run_with_typing(update, coro):
 def authorized(func):
     @functools.wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != TELEGRAM_USER_ID:
+        if update.effective_user.id not in TELEGRAM_USER_IDS:
             await update.message.reply_text("⛔ No autorizado.")
-            logger.warning(f"Unauthorized access from {update.effective_user.id}")
+            logger.warning(f"Unauthorized access from user {update.effective_user.id}")
             return
+        name = USER_NAMES.get(update.effective_user.id, str(update.effective_user.id))
+        logger.info(f"[{name}] /{func.__name__.removeprefix('cmd_')}")
         return await func(update, context)
     return wrapper
 
@@ -746,12 +762,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _last_message_time[user_id] = now
 
+    name = USER_NAMES.get(user_id, str(user_id))
+    logger.info(f"[{name}] {update.message.text[:80]}")
     response = await run_with_typing(update, chat_with_claude(user_id, update.message.text))
     await send_long_message(update, response)
 
 
 @authorized
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = USER_NAMES.get(update.effective_user.id, str(update.effective_user.id))
+    logger.info(f"[{name}] voice message")
     if not GEMINI_API_KEY:
         await update.message.reply_text("🎤 Configurá GEMINI_API_KEY en el .env para usar voz.")
         return
@@ -938,18 +958,17 @@ async def send_waterguru_report():
 
         report = "\n".join(lines)
 
-        # Try Markdown first, fallback to plain text
+        # Send WaterGuru report only to admin
         try:
             await telegram_bot.send_message(
-                chat_id=TELEGRAM_USER_ID,
+                chat_id=TELEGRAM_ADMIN_ID,
                 text=report,
                 parse_mode="Markdown",
             )
         except Exception:
-            # Strip markdown formatting and send plain
             plain = report.replace("*", "").replace("_", "")
             await telegram_bot.send_message(
-                chat_id=TELEGRAM_USER_ID,
+                chat_id=TELEGRAM_ADMIN_ID,
                 text=plain,
             )
         logger.info("WaterGuru report sent")
@@ -958,7 +977,7 @@ async def send_waterguru_report():
         logger.error(f"WaterGuru report error: {e}")
         try:
             await telegram_bot.send_message(
-                chat_id=TELEGRAM_USER_ID,
+                chat_id=TELEGRAM_ADMIN_ID,
                 text=f"🏊 Nueva medición WaterGuru pero hubo error: {e}",
             )
         except Exception:
@@ -1056,7 +1075,7 @@ def main():
                 text = f"✅ *Zaino Bot v{BOT_VERSION} iniciado*\nConectado y listo."
 
             await context.bot.send_message(
-                chat_id=TELEGRAM_USER_ID,
+                chat_id=TELEGRAM_ADMIN_ID,
                 text=text,
                 parse_mode="Markdown",
             )

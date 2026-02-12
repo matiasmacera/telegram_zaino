@@ -10,28 +10,27 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Create and merge PR
+      - name: Merge to main
         run: |
-          # Check if PR already exists for this branch
-          PR_NUMBER=$(gh pr list --head "$GITHUB_REF_NAME" --json number -q '.[0].number' 2>/dev/null || echo "")
+          set -ex
 
-          if [ -z "$PR_NUMBER" ]; then
-            # Create PR using last commit message as title
-            gh pr create \
-              --title "$(git log -1 --pretty=%s)" \
-              --body "Auto-merge from Claude Code branch \`$GITHUB_REF_NAME\`" \
-              --base main \
-              --head "$GITHUB_REF_NAME"
-            PR_NUMBER=$(gh pr list --head "$GITHUB_REF_NAME" --json number -q '.[0].number')
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Merge with squash and delete the branch
-          gh pr merge "$PR_NUMBER" --squash --delete-branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH="$GITHUB_REF_NAME"
+          echo "Merging $BRANCH into main"
+
+          git fetch origin main
+          git checkout main
+          git merge --squash "origin/$BRANCH"
+          git commit -m "$(git log "origin/$BRANCH" -1 --pretty=%s) (#$GITHUB_RUN_NUMBER)"
+          git push origin main
+
+          echo "Successfully merged $BRANCH into main"

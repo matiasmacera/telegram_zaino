@@ -20,15 +20,18 @@ LOG_FILE="$HOME/Apps Zaino/zaino-monitor/monitor.log"
 LAST_CHECK_FILE="$HOME/Apps Zaino/zaino-monitor/.last_check"
 UTMCTL="/Applications/UTM.app/Contents/MacOS/utmctl"
 
-# Load credentials from .env
+# Load config from .env.config (non-secret) and .env (secrets)
+if [[ -f "$REPO_DIR/.env.config" ]]; then
+    export $(grep -E '^(TELEGRAM_USER_ID|HA_URL)=' "$REPO_DIR/.env.config" | xargs)
+fi
 if [[ -f "$REPO_DIR/.env" ]]; then
-    export $(grep -E '^(TELEGRAM_BOT_TOKEN|TELEGRAM_USER_ID|HA_URL|HA_TOKEN)=' "$REPO_DIR/.env" | xargs)
-    TELEGRAM_CHAT_ID="$TELEGRAM_USER_ID"
-    HA_URL="${HA_URL:-http://192.168.99.232:8123}"
+    export $(grep -E '^(TELEGRAM_BOT_TOKEN|HA_TOKEN)=' "$REPO_DIR/.env" | xargs)
 else
     echo "ERROR: .env not found at $REPO_DIR/.env" >&2
     exit 1
 fi
+TELEGRAM_CHAT_ID="$TELEGRAM_USER_ID"
+HA_URL="${HA_URL:-http://192.168.99.232:8123}"
 
 # === SETUP ===
 mkdir -p "$HOME/Apps Zaino/zaino-monitor"
