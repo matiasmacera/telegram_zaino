@@ -13,7 +13,7 @@ import logging
 import tempfile
 import asyncio
 import functools
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from time import time as monotime
 
 import httpx
@@ -60,6 +60,7 @@ TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 WATERGURU_POLL_INTERVAL = int(os.environ.get("WATERGURU_POLL_INTERVAL", "1800"))
 RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "3"))
+LOCAL_TZ = timezone(timedelta(hours=int(os.environ.get("TZ_OFFSET", "-3"))))
 INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://influxdb:8086")
 INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "")
 INFLUXDB_ORG = os.environ.get("INFLUXDB_ORG", "zaino")
@@ -1005,12 +1006,14 @@ async def chat_with_claude(user_id: int, message: str) -> str:
     add_message(user_id, "user", message)
     messages = get_conversation(user_id)
 
-    # Build per-user system prompt with their name
+    # Build per-user system prompt with their name and current local time
+    now_local = datetime.now(LOCAL_TZ)
+    time_ctx = f"Fecha y hora actual: {now_local.strftime('%A %d/%m/%Y %H:%M')} (Argentina)."
     user_name = USER_NAMES.get(user_id)
     if user_name:
-        system_prompt = f"{SYSTEM_PROMPT}\n\nEstás hablando con {user_name}."
+        system_prompt = f"{SYSTEM_PROMPT}\n\n{time_ctx}\nEstás hablando con {user_name}."
     else:
-        system_prompt = SYSTEM_PROMPT
+        system_prompt = f"{SYSTEM_PROMPT}\n\n{time_ctx}"
 
     try:
         response = await asyncio.wait_for(
