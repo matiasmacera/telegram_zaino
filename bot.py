@@ -96,9 +96,30 @@ MAX_CONVERSATION_MESSAGES = 20
 # HA Event Bus config
 HA_WS_URL = HA_URL.replace("https://", "wss://").replace("http://", "ws://") + "/api/websocket"
 HA_EVENT_TRACKED_DOMAINS = {
+    # Actionable entities — full tracking, no filtering
     "light", "switch", "cover", "lock", "climate", "media_player",
     "alarm_control_panel", "fan", "vacuum", "input_boolean",
+    # Observational entities — pattern-filtered to avoid noise
+    "binary_sensor", "sensor", "camera",
 }
+
+# Pattern filters for noisy domains (match against entity_id)
+HA_SENSOR_PATTERNS = {
+    "battery", "temperature", "temp_", "humidity",
+    "power", "energy", "consumption", "current",
+    "air_quality", "pm25", "pm2_5", "pm10", "co2", "voc", "tvoc",
+    "generac", "generador",
+    "signal_strength", "rssi",
+}
+HA_BINARY_SENSOR_PATTERNS = {
+    "door", "window", "motion", "reja", "puerta", "gate",
+    "overcurrent", "tamper", "smoke", "gas", "leak", "water",
+    "occupancy", "vibration", "opening", "contact", "ring",
+}
+
+# Rate limiting for sensor domain (seconds between writes per entity)
+HA_SENSOR_MIN_INTERVAL = 300  # 5 min — avoids flooding from oscillating values
+_event_rate_limit: dict[str, float] = {}
 
 # Rate limiting state
 _last_message_time: dict[int, float] = {}
@@ -588,6 +609,16 @@ async def ha_event_listener():
                         if domain not in HA_EVENT_TRACKED_DOMAINS:
                             continue
 
+                        # Pattern filtering for noisy domains
+                        if domain == "binary_sensor":
+                            entity_lower = entity_id.lower()
+                            if not any(p in entity_lower for p in HA_BINARY_SENSOR_PATTERNS):
+                                continue
+                        elif domain == "sensor":
+                            entity_lower = entity_id.lower()
+                            if not any(p in entity_lower for p in HA_SENSOR_PATTERNS):
+                                continue
+
                         new_state = data.get("new_state") or {}
                         old_state = data.get("old_state") or {}
 
@@ -596,6 +627,13 @@ async def ha_event_listener():
                         new_val = new_state.get("state", "")
                         if old_val == new_val:
                             continue
+
+                        # Rate limit sensor domain (max 1 write per 5 min per entity)
+                        if domain == "sensor":
+                            now_ts = monotime()
+                            if now_ts - _event_rate_limit.get(entity_id, 0) < HA_SENSOR_MIN_INTERVAL:
+                                continue
+                            _event_rate_limit[entity_id] = now_ts
 
                         context = event.get("context", {})
                         user_id = context.get("user_id") or ""
@@ -613,11 +651,34 @@ async def ha_event_listener():
                             .field("parent_id", parent_id)
                         )
 
+                        # Domain-specific attribute enrichment
+                        attrs = new_state.get("attributes", {})
+
+                        if domain == "climate":
+                            for k in ("current_temperature", "temperature", "hvac_action"):
+                                v = attrs.get(k)
+                                if v is not None:
+                                    point.field(k, float(v) if isinstance(v, (int, float)) else str(v))
+                        elif domain == "lock":
+                            bl = attrs.get("battery_level")
+                            if bl is not None:
+                                point.field("battery", float(bl))
+                        elif domain == "vacuum":
+                            bl = attrs.get("battery_level")
+                            if bl is not None:
+                                point.field("battery", float(bl))
+                            vstatus = attrs.get("status")
+                            if vstatus:
+                                point.field("vacuum_status", str(vstatus))
+                        elif domain == "sensor":
+                            unit = attrs.get("unit_of_measurement")
+                            if unit:
+                                point.tag("unit", unit)
+
                         points = [point]
 
                         # For media_player playing, capture what's playing
                         if domain == "media_player" and new_val == "playing":
-                            attrs = new_state.get("attributes", {})
                             media_point = (
                                 Point("media_history")
                                 .tag("entity_id", entity_id)
