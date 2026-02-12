@@ -106,15 +106,37 @@ HA_EVENT_TRACKED_DOMAINS = {
 # Pattern filters for noisy domains (match against entity_id)
 HA_SENSOR_PATTERNS = {
     "battery", "temperature", "temp_", "humidity",
-    "power", "energy", "consumption", "current",
+    "power", "energy", "consumption",
     "air_quality", "pm25", "pm2_5", "pm10", "co2", "voc", "tvoc",
     "generac", "generador",
-    "signal_strength", "rssi",
+    "signal_strength", "rssi", "wireless",
+    # Weather station (WeatherFlow Tempest)
+    "wind", "precipitation", "lightning", "illuminance",
+    "irradiance", "uv_index", "pressure", "dew_point",
+    "feels_like", "air_density",
+    # Pool chemistry
+    "waterguru", "monitor_pileta",
+    # Vacuum robots
+    "roborock", "saros_z70", "doris",
+    # Alarm
+    "alarm_info",
 }
 HA_BINARY_SENSOR_PATTERNS = {
     "door", "window", "motion", "reja", "puerta", "gate",
     "overcurrent", "tamper", "smoke", "gas", "leak", "water",
-    "occupancy", "vibration", "opening", "contact", "ring",
+    "occupancy", "vibration", "opening", "contact",
+    # Spanish names (Z-Wave sensors)
+    "movimiento", "ventana",
+    # Shelly safety alerts
+    "overheating", "overvoltage", "overpowering",
+    # Generator alerts
+    "generac",
+    # Flood/freeze sensors
+    "flood", "freeze",
+    # AC filter maintenance
+    "filter_clean",
+    # Doorbell
+    "ding",
 }
 
 # Rate limiting for sensor domain (seconds between writes per entity)

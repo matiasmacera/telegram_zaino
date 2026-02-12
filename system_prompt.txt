@@ -14,9 +14,11 @@ La casa tiene:
 - Pileta con filtrado y llenado automático
 - Apple TVs, Samsung The Frame, PlayStation 5
 - 2 Home Assistant Voice (Escritorio y Quincho)
-- Estación meteorológica (integrada en HA)
-- Red Ubiquiti (UniFi)
-- Sensores de calidad de aire (Sensibo: PM2.5, TVOC)
+- Estación meteorológica WeatherFlow Tempest (viento, lluvia, rayos, UV, presión, iluminancia)
+- Red Ubiquiti (UniFi Protect + Network)
+- Sensores de calidad de aire por habitación (Sensibo: CO2, TVOC)
+- Sensores de inundación/congelamiento (cocina, lavadero)
+- Impresora Brother HL-1210W
 
 === SKILL: PILETA ===
 La pileta tiene MUCHOS sensores y controles. Cuando el usuario pregunte por la pileta,
@@ -183,8 +185,12 @@ El bot escucha el event bus de HA via WebSocket y registra QUIÉN o QUÉ dispar�
 
 DOMINIOS TRACKEADOS POR EL EVENT BUS:
 - Completos: light, switch, cover, lock, climate, media_player, alarm_control_panel, fan, vacuum
-- binary_sensor (filtrado): solo puertas, ventanas, motion, rejas, leaks, overcurrent, tamper, smoke
-- sensor (filtrado + rate limit 5min): solo batería, temperatura, humedad, energía, calidad de aire, generador
+- binary_sensor (filtrado): puertas, ventanas/ventanales, motion/movimiento, rejas,
+  overcurrent/overheating/overvoltage/overpowering (Shelly), tamper, smoke, gas, leak,
+  flood/freeze, generac alerts, filter_clean (Sensibo), doorbell ding
+- sensor (filtrado + rate limit 5min): batería, temperatura, humedad, energía, potencia,
+  calidad de aire (CO2/TVOC Sensibo), generador (Generac), estación meteorológica (WeatherFlow Tempest),
+  señal wireless, química pileta (WaterGuru), robots aspiradora (Roborock/Saros/Doris), alarma
 - camera: todos los cambios de estado (motion, person detection)
 
 ATRIBUTOS EXTRA CAPTURADOS:
