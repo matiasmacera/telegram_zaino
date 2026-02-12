@@ -61,6 +61,9 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data")
 WATERGURU_POLL_INTERVAL = int(os.environ.get("WATERGURU_POLL_INTERVAL", "1800"))
 RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "3"))
 LOCAL_TZ = timezone(timedelta(hours=int(os.environ.get("TZ_OFFSET", "-3"))))
+WEATHER_LAT = os.environ.get("WEATHER_LAT", "-34.46")   # Pilar, Buenos Aires
+WEATHER_LON = os.environ.get("WEATHER_LON", "-58.91")
+WEATHER_POLL_INTERVAL = int(os.environ.get("WEATHER_POLL_INTERVAL", "900"))  # 15 min
 INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://influxdb:8086")
 INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "")
 INFLUXDB_ORG = os.environ.get("INFLUXDB_ORG", "zaino")
@@ -808,6 +811,72 @@ async def tool_query_bot_usage(days: int = 7) -> str:
         return json.dumps({"error": str(e)})
 
 
+async def tool_query_weather_history(hours: int = 24) -> str:
+    """Query weather history from InfluxDB."""
+    if not get_influx_client():
+        return json.dumps({"error": "InfluxDB no configurado"})
+
+    try:
+        query = (
+            f'from(bucket: "{INFLUXDB_BUCKET}")'
+            f" |> range(start: -{hours}h)"
+            f' |> filter(fn: (r) => r["_measurement"] == "weather")'
+            ' |> sort(columns: ["_time"], desc: true)'
+            " |> limit(n: 500)"
+        )
+
+        query_api = get_influx_client().query_api()
+        tables = await query_api.query(query, org=INFLUXDB_ORG)
+
+        events = defaultdict(dict)
+        for table in tables:
+            for record in table.records:
+                key = record.get_time().isoformat()
+                events[key]["time"] = key
+                events[key][record.get_field()] = record.get_value()
+
+        result = sorted(events.values(), key=lambda x: x["time"], reverse=True)
+
+        if not result:
+            return json.dumps({"message": f"Sin datos meteorológicos en las últimas {hours}h. "
+                               "Se recolectan cada 15 minutos."})
+
+        # Current conditions (most recent)
+        latest = result[0]
+
+        # Compute min/max/avg for numeric fields
+        numeric_fields = ["temperature", "apparent_temperature", "humidity",
+                          "precipitation", "wind_speed", "uv_index", "pressure"]
+        stats = {}
+        for field in numeric_fields:
+            values = [e.get(field) for e in result
+                      if isinstance(e.get(field), (int, float))]
+            if values:
+                stats[field] = {
+                    "min": round(min(values), 1),
+                    "max": round(max(values), 1),
+                    "avg": round(sum(values) / len(values), 1),
+                }
+
+        # Total precipitation
+        precip_values = [e.get("precipitation", 0) for e in result
+                         if isinstance(e.get("precipitation"), (int, float))]
+        total_precip = round(sum(precip_values) * (WEATHER_POLL_INTERVAL / 3600), 1) if precip_values else 0
+
+        return json.dumps({
+            "period_hours": hours,
+            "data_points": len(result),
+            "current": latest,
+            "stats": stats,
+            "total_precipitation_mm_approx": total_precip,
+            "samples": result[:10],  # Last 10 readings (~2.5h)
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"InfluxDB query_weather_history error: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ─── Tool Registry ───────────────────────────────────────────────────────────
 
 TOOL_FUNCTIONS = {
@@ -824,6 +893,7 @@ TOOL_FUNCTIONS = {
     "query_who_changed": tool_query_who_changed,
     "query_media_history": tool_query_media_history,
     "query_bot_usage": tool_query_bot_usage,
+    "query_weather_history": tool_query_weather_history,
 }
 
 TOOLS = [
@@ -969,6 +1039,16 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "days": {"type": "integer", "description": "Days of history (default 7)"},
+            },
+        },
+    },
+    {
+        "name": "query_weather_history",
+        "description": "Query weather history for Pilar, Buenos Aires. Shows temperature, humidity, wind, precipitation, UV, pressure, cloud cover, and conditions. Use for correlating home behavior with weather, or answering 'how was the weather today/yesterday?'",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hours": {"type": "integer", "description": "Hours of history (default 24)"},
             },
         },
     },
@@ -1626,6 +1706,76 @@ async def waterguru_poll(context):
         logger.error(f"WaterGuru poll error: {e}")
 
 
+# ─── Weather Data Collection ─────────────────────────────────────────────────
+
+OPENMETEO_URL = (
+    f"https://api.open-meteo.com/v1/forecast?"
+    f"latitude={WEATHER_LAT}&longitude={WEATHER_LON}"
+    f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
+    f"precipitation,weather_code,cloud_cover,pressure_msl,"
+    f"wind_speed_10m,wind_direction_10m,uv_index"
+    f"&daily=sunrise,sunset&timezone=America/Argentina/Buenos_Aires&forecast_days=1"
+)
+
+WEATHER_CODES = {
+    0: "Despejado", 1: "Mayormente despejado", 2: "Parcialmente nublado",
+    3: "Nublado", 45: "Niebla", 48: "Niebla con escarcha",
+    51: "Llovizna leve", 53: "Llovizna moderada", 55: "Llovizna intensa",
+    61: "Lluvia leve", 63: "Lluvia moderada", 65: "Lluvia intensa",
+    71: "Nieve leve", 73: "Nieve moderada", 75: "Nieve intensa",
+    80: "Chaparrón leve", 81: "Chaparrón moderado", 82: "Chaparrón intenso",
+    95: "Tormenta", 96: "Tormenta con granizo leve", 99: "Tormenta con granizo",
+}
+
+
+async def weather_poll(context):
+    """Poll Open-Meteo every 15 min and write weather data to InfluxDB."""
+    if not get_influx_client():
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(OPENMETEO_URL)
+            if resp.status_code != 200:
+                logger.error(f"Weather poll HTTP {resp.status_code}")
+                return
+            data = resp.json()
+
+        current = data.get("current", {})
+        daily = data.get("daily", {})
+
+        weather_code = current.get("weather_code", 0)
+        condition = WEATHER_CODES.get(weather_code, f"Código {weather_code}")
+
+        point = (
+            Point("weather")
+            .tag("location", "pilar")
+            .field("temperature", float(current.get("temperature_2m", 0)))
+            .field("apparent_temperature", float(current.get("apparent_temperature", 0)))
+            .field("humidity", float(current.get("relative_humidity_2m", 0)))
+            .field("precipitation", float(current.get("precipitation", 0)))
+            .field("cloud_cover", float(current.get("cloud_cover", 0)))
+            .field("pressure", float(current.get("pressure_msl", 0)))
+            .field("wind_speed", float(current.get("wind_speed_10m", 0)))
+            .field("wind_direction", float(current.get("wind_direction_10m", 0)))
+            .field("uv_index", float(current.get("uv_index", 0)))
+            .field("weather_code", weather_code)
+            .field("condition", condition)
+        )
+
+        # Add sunrise/sunset if available
+        if daily.get("sunrise"):
+            point.field("sunrise", daily["sunrise"][0])
+        if daily.get("sunset"):
+            point.field("sunset", daily["sunset"][0])
+
+        await write_points_to_influx(point)
+        logger.debug(f"Weather: {current.get('temperature_2m')}°C, {condition}")
+
+    except Exception as e:
+        logger.error(f"Weather poll error: {e}")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -1705,6 +1855,7 @@ def main():
 
     app.job_queue.run_repeating(heartbeat, interval=30, first=10)
     app.job_queue.run_repeating(waterguru_poll, interval=WATERGURU_POLL_INTERVAL, first=60)
+    app.job_queue.run_repeating(weather_poll, interval=WEATHER_POLL_INTERVAL, first=15)
     app.job_queue.run_once(startup_notify, when=2)
     app.job_queue.run_once(start_event_listener, when=5)
 

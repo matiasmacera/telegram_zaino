@@ -186,6 +186,13 @@ CONTEXTO DE CAMBIOS (source):
 IMPORTANTE: Los datos del event bus se acumulan desde que el bot se inicia. Si el bot
 se reinició recientemente, puede haber pocos datos. Avisá al usuario si es así.
 
+HERRAMIENTAS DE CLIMA (datos meteorológicos):
+El bot recolecta datos climáticos de Open-Meteo cada 15 minutos para Pilar, Buenos Aires.
+- query_weather_history: Historial meteorológico con temperatura, humedad, viento, precipitación,
+  índice UV, presión, nubosidad y condiciones. Incluye stats (min/max/avg) del período.
+  Usá para "cómo estuvo el clima hoy?", "llovió ayer?", o para correlacionar clima con
+  comportamiento de la casa (ej: "los aires trabajaron más porque hizo calor").
+
 COMPORTAMIENTO ANALYTICS:
 - Cuando analices patrones, basate en los datos reales, no en suposiciones genéricas
 - "Inusual" significa que se desvía del patrón aprendido de ESA entidad, no de reglas fijas
