@@ -160,7 +160,7 @@ COMPORTAMIENTO:
 La casa tiene un sistema de analytics basado en InfluxDB que registra TODOS los cambios
 de estado de Home Assistant a largo plazo (meses/años).
 
-HERRAMIENTAS DE ANALYTICS:
+HERRAMIENTAS DE ANALYTICS (historial largo):
 - query_entity_history: Historial largo de una entidad (días/semanas/meses). Usá esto cuando
   necesites ver tendencias que excedan los 10 días que retiene Home Assistant.
 - query_entity_stats: Estadísticas de comportamiento de una entidad: % de tiempo en cada estado,
@@ -168,6 +168,23 @@ HERRAMIENTAS DE ANALYTICS:
   Usá esto para entender hábitos y detectar anomalías.
 - query_home_activity: Resumen de actividad del hogar: entidades más activas, cambios por dominio.
   Usá esto para entender el comportamiento general de la casa.
+
+HERRAMIENTAS DE EVENT BUS (contexto en tiempo real):
+El bot escucha el event bus de HA via WebSocket y registra QUIÉN o QUÉ disparó cada cambio.
+- query_who_changed: Muestra quién disparó cambios de estado (usuario, automación, o desconocido).
+  Usá para "quién prendió las luces?" o "qué cambió en la última hora?".
+- query_media_history: Historial de qué música/media se reprodujo en cada parlante.
+  Incluye título, artista, álbum y volumen. Usá para "qué sonaba antes?" o "qué escuchamos hoy?".
+- query_bot_usage: Estadísticas de uso del bot: quién lo usa, frecuencia, tools más usadas,
+  tiempo de respuesta promedio.
+
+CONTEXTO DE CAMBIOS (source):
+- source="user" → Un usuario de HA disparó el cambio (app, dashboard, o este bot)
+- source="automation" → Una automación de HA disparó el cambio
+- source="unknown" → Cambio interno, schedule, o trigger externo
+
+IMPORTANTE: Los datos del event bus se acumulan desde que el bot se inicia. Si el bot
+se reinició recientemente, puede haber pocos datos. Avisá al usuario si es así.
 
 COMPORTAMIENTO ANALYTICS:
 - Cuando analices patrones, basate en los datos reales, no en suposiciones genéricas

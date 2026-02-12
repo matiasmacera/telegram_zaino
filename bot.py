@@ -28,6 +28,8 @@ from telegram.ext import (
 )
 from anthropic import AsyncAnthropic
 from influxdb_client.client.influxdb_client_async import InfluxDBClientAsync
+from influxdb_client import Point
+import websockets
 
 # ─── Config Validation ────────────────────────────────────────────────────────
 
@@ -87,6 +89,13 @@ except FileNotFoundError:
     pass
 MAX_CONVERSATION_MESSAGES = 20
 
+# HA Event Bus config
+HA_WS_URL = HA_URL.replace("https://", "wss://").replace("http://", "ws://") + "/api/websocket"
+HA_EVENT_TRACKED_DOMAINS = {
+    "light", "switch", "cover", "lock", "climate", "media_player",
+    "alarm_control_panel", "fan", "vacuum", "input_boolean",
+}
+
 # Rate limiting state
 _last_message_time: dict[int, float] = {}
 
@@ -128,6 +137,39 @@ def get_influx_client() -> InfluxDBClientAsync | None:
 
 if not INFLUXDB_TOKEN:
     logger.warning("INFLUXDB_TOKEN not set — analytics features disabled")
+
+
+async def write_points_to_influx(*points):
+    """Write points to InfluxDB (fire-and-forget, logs errors)."""
+    client = get_influx_client()
+    if not client:
+        return
+    try:
+        write_api = client.write_api()
+        await write_api.write(bucket=INFLUXDB_BUCKET, record=list(points))
+    except Exception as e:
+        logger.error(f"InfluxDB write error: {e}")
+
+
+# Track tools used in last interaction (populated by chat_with_claude)
+_last_tools_used: dict[int, list[str]] = {}
+
+
+async def log_bot_interaction(user_id: int, msg_type: str, message: str, response_time_ms: int = 0):
+    """Log a bot interaction to InfluxDB."""
+    tools = _last_tools_used.pop(user_id, [])
+    point = (
+        Point("bot_interaction")
+        .tag("user_id", str(user_id))
+        .tag("user_name", USER_NAMES.get(user_id, str(user_id)))
+        .tag("msg_type", msg_type)
+        .field("message", message[:200])
+        .field("response_time_ms", response_time_ms)
+        .field("tools_used", ",".join(tools) if tools else "none")
+        .field("tool_count", len(tools))
+    )
+    await write_points_to_influx(point)
+
 
 # ─── Conversation History ────────────────────────────────────────────────────
 
@@ -492,6 +534,279 @@ async def tool_query_home_activity(hours: int = 24, domain: str = None) -> str:
         return json.dumps({"error": str(e)})
 
 
+# ─── HA Event Bus Listener ────────────────────────────────────────────────────
+
+
+async def ha_event_listener():
+    """Connect to HA WebSocket API and listen for state_changed events.
+    Writes context-enriched events to InfluxDB for who-triggered-what analytics."""
+    reconnect_delay = 5
+
+    while True:
+        try:
+            async with websockets.connect(HA_WS_URL) as ws:
+                # Phase 1: Authenticate
+                msg = json.loads(await ws.recv())
+                if msg.get("type") != "auth_required":
+                    logger.error(f"HA WS unexpected message: {msg.get('type')}")
+                    await asyncio.sleep(reconnect_delay)
+                    continue
+
+                await ws.send(json.dumps({"type": "auth", "access_token": HA_TOKEN}))
+                msg = json.loads(await ws.recv())
+                if msg.get("type") != "auth_ok":
+                    logger.error(f"HA WS auth failed: {msg}")
+                    await asyncio.sleep(30)
+                    continue
+
+                logger.info("HA Event Bus: connected and authenticated")
+                reconnect_delay = 5  # reset on successful connection
+
+                # Phase 2: Subscribe to state_changed events
+                await ws.send(json.dumps({
+                    "id": 1,
+                    "type": "subscribe_events",
+                    "event_type": "state_changed",
+                }))
+
+                # Phase 3: Process events
+                async for raw_msg in ws:
+                    try:
+                        msg = json.loads(raw_msg)
+                        if msg.get("type") != "event":
+                            continue
+
+                        event = msg["event"]
+                        data = event["data"]
+                        entity_id = data["entity_id"]
+                        domain = entity_id.split(".")[0]
+
+                        if domain not in HA_EVENT_TRACKED_DOMAINS:
+                            continue
+
+                        new_state = data.get("new_state") or {}
+                        old_state = data.get("old_state") or {}
+
+                        # Skip if state didn't actually change
+                        old_val = old_state.get("state", "")
+                        new_val = new_state.get("state", "")
+                        if old_val == new_val:
+                            continue
+
+                        context = event.get("context", {})
+                        user_id = context.get("user_id") or ""
+                        parent_id = context.get("parent_id") or ""
+                        source = "user" if user_id else ("automation" if parent_id else "unknown")
+
+                        point = (
+                            Point("ha_context")
+                            .tag("entity_id", entity_id)
+                            .tag("domain", domain)
+                            .tag("source", source)
+                            .field("old_state", old_val)
+                            .field("new_state", new_val)
+                            .field("user_id", user_id)
+                            .field("parent_id", parent_id)
+                        )
+
+                        points = [point]
+
+                        # For media_player playing, capture what's playing
+                        if domain == "media_player" and new_val == "playing":
+                            attrs = new_state.get("attributes", {})
+                            media_point = (
+                                Point("media_history")
+                                .tag("entity_id", entity_id)
+                                .tag("source", source)
+                                .field("title", attrs.get("media_title", ""))
+                                .field("artist", attrs.get("media_artist", ""))
+                                .field("album", attrs.get("media_album_name", ""))
+                                .field("content_type", attrs.get("media_content_type", ""))
+                                .field("volume", float(attrs.get("volume_level") or 0))
+                            )
+                            if user_id:
+                                media_point.field("user_id", user_id)
+                            points.append(media_point)
+
+                        await write_points_to_influx(*points)
+
+                    except Exception as e:
+                        logger.error(f"HA Event Bus process error: {e}")
+
+        except asyncio.CancelledError:
+            logger.info("HA Event Bus: shutting down")
+            break
+        except Exception as e:
+            logger.error(f"HA Event Bus error: {e}, reconnecting in {reconnect_delay}s")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 60)
+
+
+# ─── Event Bus Analytics Tools ────────────────────────────────────────────────
+
+
+async def tool_query_who_changed(entity_id: str = None, hours: int = 24) -> str:
+    """Query who triggered state changes, with context (user/automation/unknown)."""
+    if not get_influx_client():
+        return json.dumps({"error": "InfluxDB no configurado"})
+
+    try:
+        entity_filter = ""
+        if entity_id:
+            entity_filter = f' |> filter(fn: (r) => r["entity_id"] == "{entity_id}")'
+
+        query = (
+            f'from(bucket: "{INFLUXDB_BUCKET}")'
+            f" |> range(start: -{hours}h)"
+            f' |> filter(fn: (r) => r["_measurement"] == "ha_context")'
+            f"{entity_filter}"
+            ' |> sort(columns: ["_time"], desc: true)'
+            " |> limit(n: 200)"
+        )
+
+        query_api = get_influx_client().query_api()
+        tables = await query_api.query(query, org=INFLUXDB_ORG)
+
+        events = defaultdict(dict)
+        for table in tables:
+            for record in table.records:
+                key = f"{record.get_time().isoformat()}_{record.values.get('entity_id', '')}"
+                events[key]["time"] = record.get_time().isoformat()
+                events[key]["entity_id"] = record.values.get("entity_id", "")
+                events[key]["domain"] = record.values.get("domain", "")
+                events[key]["source"] = record.values.get("source", "")
+                events[key][record.get_field()] = record.get_value()
+
+        result = sorted(events.values(), key=lambda x: x["time"], reverse=True)
+
+        if not result:
+            return json.dumps({"message": f"Sin datos de contexto en las últimas {hours}h. "
+                               "El event bus acumula datos desde que el bot se inicia."})
+
+        source_counts = Counter(e.get("source", "unknown") for e in result)
+
+        return json.dumps({
+            "period_hours": hours,
+            "entity_filter": entity_id,
+            "total_changes": len(result),
+            "by_source": dict(source_counts),
+            "events": result[:50],
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"InfluxDB query_who_changed error: {e}")
+        return json.dumps({"error": str(e)})
+
+
+async def tool_query_media_history(entity_id: str = None, hours: int = 24) -> str:
+    """Query what music/media was played on speakers."""
+    if not get_influx_client():
+        return json.dumps({"error": "InfluxDB no configurado"})
+
+    try:
+        entity_filter = ""
+        if entity_id:
+            entity_filter = f' |> filter(fn: (r) => r["entity_id"] == "{entity_id}")'
+
+        query = (
+            f'from(bucket: "{INFLUXDB_BUCKET}")'
+            f" |> range(start: -{hours}h)"
+            f' |> filter(fn: (r) => r["_measurement"] == "media_history")'
+            f"{entity_filter}"
+            ' |> sort(columns: ["_time"], desc: true)'
+            " |> limit(n: 200)"
+        )
+
+        query_api = get_influx_client().query_api()
+        tables = await query_api.query(query, org=INFLUXDB_ORG)
+
+        events = defaultdict(dict)
+        for table in tables:
+            for record in table.records:
+                key = f"{record.get_time().isoformat()}_{record.values.get('entity_id', '')}"
+                events[key]["time"] = record.get_time().isoformat()
+                events[key]["entity_id"] = record.values.get("entity_id", "")
+                events[key]["source"] = record.values.get("source", "")
+                events[key][record.get_field()] = record.get_value()
+
+        result = sorted(events.values(), key=lambda x: x["time"], reverse=True)
+
+        if not result:
+            return json.dumps({"message": f"Sin historial de media en las últimas {hours}h. "
+                               "Se registra cada vez que un speaker empieza a reproducir."})
+
+        return json.dumps({
+            "period_hours": hours,
+            "entity_filter": entity_id,
+            "total_plays": len(result),
+            "history": result[:50],
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"InfluxDB query_media_history error: {e}")
+        return json.dumps({"error": str(e)})
+
+
+async def tool_query_bot_usage(days: int = 7) -> str:
+    """Query bot usage statistics."""
+    if not get_influx_client():
+        return json.dumps({"error": "InfluxDB no configurado"})
+
+    try:
+        query = (
+            f'from(bucket: "{INFLUXDB_BUCKET}")'
+            f" |> range(start: -{days}d)"
+            f' |> filter(fn: (r) => r["_measurement"] == "bot_interaction")'
+            ' |> sort(columns: ["_time"], desc: true)'
+            " |> limit(n: 500)"
+        )
+
+        query_api = get_influx_client().query_api()
+        tables = await query_api.query(query, org=INFLUXDB_ORG)
+
+        events = defaultdict(dict)
+        for table in tables:
+            for record in table.records:
+                key = f"{record.get_time().isoformat()}_{record.values.get('user_name', '')}"
+                events[key]["time"] = record.get_time().isoformat()
+                events[key]["user_name"] = record.values.get("user_name", "")
+                events[key]["msg_type"] = record.values.get("msg_type", "")
+                events[key][record.get_field()] = record.get_value()
+
+        interactions = sorted(events.values(), key=lambda x: x["time"], reverse=True)
+
+        if not interactions:
+            return json.dumps({"message": f"Sin interacciones en los últimos {days} días."})
+
+        by_user = Counter(e.get("user_name", "?") for e in interactions)
+        by_type = Counter(e.get("msg_type", "?") for e in interactions)
+
+        all_tools = []
+        for e in interactions:
+            tools = e.get("tools_used", "none")
+            if tools and tools != "none":
+                all_tools.extend(tools.split(","))
+        top_tools = Counter(all_tools).most_common(10)
+
+        times = [e.get("response_time_ms", 0) for e in interactions
+                 if isinstance(e.get("response_time_ms"), (int, float)) and e.get("response_time_ms", 0) > 0]
+        avg_time = round(sum(times) / len(times)) if times else 0
+
+        return json.dumps({
+            "period_days": days,
+            "total_interactions": len(interactions),
+            "by_user": dict(by_user),
+            "by_type": dict(by_type),
+            "top_tools": dict(top_tools),
+            "avg_response_time_ms": avg_time,
+            "recent": interactions[:20],
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"InfluxDB query_bot_usage error: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ─── Tool Registry ───────────────────────────────────────────────────────────
 
 TOOL_FUNCTIONS = {
@@ -505,6 +820,9 @@ TOOL_FUNCTIONS = {
     "query_entity_history": tool_query_entity_history,
     "query_entity_stats": tool_query_entity_stats,
     "query_home_activity": tool_query_home_activity,
+    "query_who_changed": tool_query_who_changed,
+    "query_media_history": tool_query_media_history,
+    "query_bot_usage": tool_query_bot_usage,
 }
 
 TOOLS = [
@@ -621,6 +939,38 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "query_who_changed",
+        "description": "Query who or what triggered state changes on entities (user, automation, or unknown). Shows context for each change from the HA event bus. Use for 'who turned on the lights?' or 'what changed recently?'",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_id": {"type": "string", "description": "Filter by entity (optional, shows all tracked domains if omitted)"},
+                "hours": {"type": "integer", "description": "Hours of history (default 24)"},
+            },
+        },
+    },
+    {
+        "name": "query_media_history",
+        "description": "Query what music/media was played on speakers. Shows title, artist, album, speaker, and who started it. Use for 'what was playing earlier?' or 'what did we listen to today?'",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_id": {"type": "string", "description": "Filter by speaker entity (optional)"},
+                "hours": {"type": "integer", "description": "Hours of history (default 24)"},
+            },
+        },
+    },
+    {
+        "name": "query_bot_usage",
+        "description": "Query bot usage statistics: who uses it, message types, most used tools, and average response time.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Days of history (default 7)"},
+            },
+        },
+    },
 ]
 
 # ─── System Prompt ────────────────────────────────────────────────────────────
@@ -676,6 +1026,7 @@ async def chat_with_claude(user_id: int, message: str) -> str:
 
         max_iterations = 10
         iteration = 0
+        tools_used = []
 
         while response.stop_reason == "tool_use" and iteration < max_iterations:
             iteration += 1
@@ -685,6 +1036,7 @@ async def chat_with_claude(user_id: int, message: str) -> str:
             tool_results = []
             for block in assistant_content:
                 if block.type == "tool_use":
+                    tools_used.append(block.name)
                     logger.info(f"Tool: {block.name}({json.dumps(block.input, ensure_ascii=False)})")
                     result = await process_tool_call(block.name, block.input)
                     tool_results.append({
@@ -712,6 +1064,7 @@ async def chat_with_claude(user_id: int, message: str) -> str:
                 final_text += block.text
 
         add_message(user_id, "assistant", response.content)
+        _last_tools_used[user_id] = tools_used
         return final_text or "✅ Listo"
 
     except asyncio.TimeoutError:
@@ -1014,7 +1367,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     name = USER_NAMES.get(user_id, str(user_id))
     logger.info(f"[{name}] {update.message.text[:80]}")
+    start = monotime()
     response = await run_with_typing(update, chat_with_claude(user_id, update.message.text))
+    elapsed_ms = int((monotime() - start) * 1000)
+    asyncio.create_task(log_bot_interaction(user_id, "text", update.message.text, elapsed_ms))
     await send_long_message(update, response)
 
 
@@ -1046,7 +1402,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.message.reply_text(f"🎤 {transcribed_text}")
 
+        start = monotime()
         response = await run_with_typing(update, chat_with_claude(update.effective_user.id, transcribed_text))
+        elapsed_ms = int((monotime() - start) * 1000)
+        asyncio.create_task(log_bot_interaction(update.effective_user.id, "voice", transcribed_text, elapsed_ms))
         await send_long_message(update, response)
 
     except httpx.TimeoutException:
@@ -1333,9 +1692,18 @@ def main():
         except Exception as e:
             logger.error(f"Startup notification error: {e}")
 
+    # Start HA Event Bus listener for context tracking
+    async def start_event_listener(ctx: ContextTypes.DEFAULT_TYPE):
+        if get_influx_client():
+            asyncio.create_task(ha_event_listener())
+            logger.info("HA Event Bus listener started")
+        else:
+            logger.info("HA Event Bus listener skipped (no InfluxDB)")
+
     app.job_queue.run_repeating(heartbeat, interval=30, first=10)
     app.job_queue.run_repeating(waterguru_poll, interval=WATERGURU_POLL_INTERVAL, first=60)
     app.job_queue.run_once(startup_notify, when=2)
+    app.job_queue.run_once(start_event_listener, when=5)
 
     # Graceful shutdown handler
     def graceful_shutdown(signum, frame):
