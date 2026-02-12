@@ -101,6 +101,8 @@ HA_EVENT_TRACKED_DOMAINS = {
     "alarm_control_panel", "fan", "vacuum", "input_boolean",
     # Observational entities — pattern-filtered to avoid noise
     "binary_sensor", "sensor", "camera",
+    # Presence tracking
+    "person", "device_tracker",
 }
 
 # Pattern filters for noisy domains (match against entity_id)
@@ -120,6 +122,10 @@ HA_SENSOR_PATTERNS = {
     "roborock", "saros_z70", "doris",
     # Alarm
     "alarm_info",
+    # LG ThinQ appliances (washers)
+    "lavadora",
+    # UniFi network infrastructure
+    "usw",
 }
 HA_BINARY_SENSOR_PATTERNS = {
     "door", "window", "motion", "reja", "puerta", "gate",
@@ -137,6 +143,15 @@ HA_BINARY_SENSOR_PATTERNS = {
     "filter_clean",
     # Doorbell
     "ding",
+    # LG ThinQ appliances
+    "lavadora", "remote_start",
+}
+# Device tracker patterns — only track personal devices (phones/tablets),
+# infrastructure devices (APs, switches, Sonos) rarely change state so
+# they are tracked unfiltered via state_changed events naturally.
+HA_DEVICE_TRACKER_PATTERNS = {
+    "iphone", "ipad", "pixel", "galaxy", "phone", "mobile",
+    "macbook", "laptop",
 }
 
 # Rate limiting for sensor domain (seconds between writes per entity)
@@ -640,18 +655,41 @@ async def ha_event_listener():
                             entity_lower = entity_id.lower()
                             if not any(p in entity_lower for p in HA_SENSOR_PATTERNS):
                                 continue
+                        elif domain == "device_tracker":
+                            # Only pattern-filter personal devices; infra devices
+                            # rarely change state so they self-filter naturally
+                            entity_lower = entity_id.lower()
+                            if any(p in entity_lower for p in HA_DEVICE_TRACKER_PATTERNS):
+                                pass  # always track personal devices
+                            # Also let through any actual state change (home↔not_home)
+                            # for infra devices — handled below
 
                         new_state = data.get("new_state") or {}
                         old_state = data.get("old_state") or {}
 
-                        # Skip if state didn't actually change
+                        # Check if main state changed
                         old_val = old_state.get("state", "")
                         new_val = new_state.get("state", "")
-                        if old_val == new_val:
-                            continue
+                        state_changed = old_val != new_val
 
-                        # Rate limit sensor domain (max 1 write per 5 min per entity)
-                        if domain == "sensor":
+                        if not state_changed:
+                            # For climate/cover, also log when key attributes
+                            # change (temperature, position) even if state stays same
+                            if domain == "climate":
+                                old_temp = (old_state.get("attributes") or {}).get("current_temperature")
+                                new_temp = (new_state.get("attributes") or {}).get("current_temperature")
+                                if old_temp == new_temp:
+                                    continue
+                            elif domain == "cover":
+                                old_pos = (old_state.get("attributes") or {}).get("current_position")
+                                new_pos = (new_state.get("attributes") or {}).get("current_position")
+                                if old_pos == new_pos:
+                                    continue
+                            else:
+                                continue
+
+                        # Rate limit sensor & attribute-only changes (max 1 write per 5 min per entity)
+                        if domain == "sensor" or not state_changed:
                             now_ts = monotime()
                             if now_ts - _event_rate_limit.get(entity_id, 0) < HA_SENSOR_MIN_INTERVAL:
                                 continue
@@ -696,6 +734,32 @@ async def ha_event_listener():
                             unit = attrs.get("unit_of_measurement")
                             if unit:
                                 point.tag("unit", unit)
+                        elif domain == "cover":
+                            pos = attrs.get("current_position")
+                            if pos is not None:
+                                point.field("position", float(pos))
+                            dc = attrs.get("device_class", "")
+                            if dc:
+                                point.tag("cover_type", dc)
+                        elif domain == "device_tracker":
+                            src = attrs.get("source_type", "")
+                            if src:
+                                point.tag("source_type", src)
+                            # For GPS trackers, capture location
+                            if src == "gps":
+                                lat = attrs.get("latitude")
+                                lon = attrs.get("longitude")
+                                gps_acc = attrs.get("gps_accuracy")
+                                if lat is not None:
+                                    point.field("latitude", float(lat))
+                                if lon is not None:
+                                    point.field("longitude", float(lon))
+                                if gps_acc is not None:
+                                    point.field("gps_accuracy", float(gps_acc))
+                        elif domain == "person":
+                            src = attrs.get("source", "")
+                            if src:
+                                point.tag("source_entity", src)
 
                         points = [point]
 
