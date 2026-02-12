@@ -19,8 +19,9 @@ while true; do
 
         cd "$REPO_DIR" || continue
 
-        # Pull latest
-        git pull origin main --quiet >> "$LOG_FILE" 2>&1
+        # Reset to latest origin/main (avoids divergent branch issues)
+        git fetch origin main >> "$LOG_FILE" 2>&1
+        git reset --hard origin/main >> "$LOG_FILE" 2>&1
 
         # Rebuild and restart
         GIT_INFO=$(git log --oneline -5)

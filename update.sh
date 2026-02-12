@@ -23,7 +23,7 @@ fi
 # There are changes — pull and rebuild
 echo "$(date): Update detected ($LOCAL -> $REMOTE)" >> "$LOG_FILE"
 
-git pull origin main --quiet >> "$LOG_FILE" 2>&1
+git reset --hard origin/main >> "$LOG_FILE" 2>&1
 
 # Generate git info for the container (passed as build arg)
 GIT_INFO=$(git log --oneline -5)
