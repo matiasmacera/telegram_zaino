@@ -8,6 +8,14 @@
 # - Sends notifications via Telegram API
 # ============================================================
 
+# === SINGLE INSTANCE LOCK ===
+LOCK_FILE="$HOME/Apps Zaino/zaino-monitor/.lock"
+exec 200>"$LOCK_FILE"
+if ! flock -n 200; then
+    echo "Another instance is already running. Exiting."
+    exit 0
+fi
+
 # === CONFIG ===
 VM_NAME="Home Assistant"
 MAX_RETRIES=3
