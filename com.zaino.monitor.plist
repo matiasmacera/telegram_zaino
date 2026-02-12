@@ -7,16 +7,16 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/zaino/zaino-monitor/zaino-monitor.sh</string>
+        <string>/Users/zaino/Apps Zaino/telegram_zaino/zaino-monitor.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/zaino/zaino-monitor/stdout.log</string>
+    <string>/Users/zaino/Apps Zaino/zaino-monitor/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/zaino/zaino-monitor/stderr.log</string>
+    <string>/Users/zaino/Apps Zaino/zaino-monitor/stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

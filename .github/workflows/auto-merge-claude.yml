@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Merge to main
+      - name: Sync branch to main
         run: |
           set -ex
 
@@ -25,12 +25,20 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           BRANCH="$GITHUB_REF_NAME"
-          echo "Merging $BRANCH into main"
+          echo "Syncing $BRANCH to main"
 
           git fetch origin main
           git checkout main
-          git merge --squash "origin/$BRANCH"
-          git commit -m "$(git log "origin/$BRANCH" -1 --pretty=%s) (#$GITHUB_RUN_NUMBER)"
-          git push origin main
 
-          echo "Successfully merged $BRANCH into main"
+          # Copy branch state onto main (avoids squash merge conflicts)
+          git checkout "origin/$BRANCH" -- .
+          git add -A
+
+          # Only commit+push if there are actual changes
+          if git diff --cached --quiet; then
+            echo "No changes to merge"
+          else
+            git commit -m "$(git log "origin/$BRANCH" -1 --pretty=%s) (#$GITHUB_RUN_NUMBER)"
+            git push origin main
+            echo "Successfully synced $BRANCH to main"
+          fi

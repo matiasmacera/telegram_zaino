@@ -1,10 +1,11 @@
 #!/bin/bash
 # ============================================================
 # Zaino Unified Monitor
-# - Checks HAOS VM is running and responsive
-# - Checks Telegram bot Docker container is healthy
+# Single service that manages everything on the Mac Mini:
 # - Watches for /update trigger from Telegram bot
-# - Sends all notifications via Zaino Telegram bot
+# - Checks HAOS VM is running and responsive (every 3 min)
+# - Checks Telegram bot Docker container is healthy (every 3 min)
+# - Sends notifications via Telegram API
 # ============================================================
 
 # === CONFIG ===
@@ -30,7 +31,8 @@ else
     echo "ERROR: .env not found at $REPO_DIR/.env" >&2
     exit 1
 fi
-TELEGRAM_CHAT_ID="$TELEGRAM_USER_ID"
+# Admin = first ID (before comma)
+TELEGRAM_ADMIN_ID="${TELEGRAM_USER_ID%%,*}"
 HA_URL="${HA_URL:-http://192.168.99.232:8123}"
 
 # === SETUP ===
@@ -46,7 +48,7 @@ send_telegram() {
     local message="$1"
     curl -s -X POST \
         "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-        -d chat_id="${TELEGRAM_CHAT_ID}" \
+        -d chat_id="${TELEGRAM_ADMIN_ID}" \
         -d text="$message" \
         -d parse_mode="HTML" > /dev/null 2>&1
 }
@@ -78,14 +80,13 @@ restart_vm() {
 }
 
 check_docker_container() {
-    # Check if container is running
     local status
     status=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
 
     if [[ "$status" != "running" ]]; then
         log "DOCKER: Container '$CONTAINER_NAME' not running (status: $status). Starting..."
         send_telegram "🐳 <b>Bot caído</b> - Reiniciando container..."
-        cd "$REPO_DIR"
+        cd "$REPO_DIR" || return
         docker compose up -d >> "$LOG_FILE" 2>&1
         sleep 10
 
@@ -102,15 +103,19 @@ check_docker_container() {
 
 check_update_trigger() {
     if [[ -f "$TRIGGER_FILE" ]]; then
-        log "UPDATE: Trigger detected, pulling and rebuilding..."
+        log "UPDATE: Trigger detected, fetching and rebuilding..."
         rm -f "$TRIGGER_FILE"
 
-        cd "$REPO_DIR"
-        git pull origin main >> "$LOG_FILE" 2>&1
+        cd "$REPO_DIR" || return
+
+        # Fetch and reset to origin/main (avoids divergent branch issues)
+        git fetch origin main >> "$LOG_FILE" 2>&1
+        git reset --hard origin/main >> "$LOG_FILE" 2>&1
 
         GIT_INFO=$(git log --oneline -5)
+        log "UPDATE: Rebuilding container..."
         docker compose down >> "$LOG_FILE" 2>&1
-        docker compose build --build-arg "GIT_INFO=$GIT_INFO" >> "$LOG_FILE" 2>&1
+        docker compose build --no-cache --build-arg "GIT_INFO=$GIT_INFO" >> "$LOG_FILE" 2>&1
         docker compose up -d >> "$LOG_FILE" 2>&1
 
         log "UPDATE: Complete"
@@ -126,7 +131,6 @@ while true; do
 
     # 2. Every 3 minutes: check HAOS + Docker
     CURRENT_TIME=$(date +%s)
-    # LAST_CHECK_FILE is set in CONFIG above
 
     if [[ -f "$LAST_CHECK_FILE" ]]; then
         LAST_CHECK=$(cat "$LAST_CHECK_FILE")
