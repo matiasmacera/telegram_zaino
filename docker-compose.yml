@@ -9,6 +9,9 @@ services:
     volumes:
       - ./.trigger:/trigger
       - bot-data:/data
+    depends_on:
+      influxdb:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "sh", "-c", "[ $(( $(date +%s) - $(stat -c %Y /data/bot_healthy 2>/dev/null || echo 0) )) -lt 120 ]"]
       interval: 60s
@@ -21,5 +24,36 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  influxdb:
+    image: influxdb:2
+    container_name: zaino-influxdb
+    restart: always
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=zaino
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:-zaino2026}
+      - DOCKER_INFLUXDB_INIT_ORG=zaino
+      - DOCKER_INFLUXDB_INIT_BUCKET=homeassistant
+      - DOCKER_INFLUXDB_INIT_RETENTION=0
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN}
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   bot-data:
+  influxdb-data:
+  influxdb-config:

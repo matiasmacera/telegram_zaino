@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from time import time as monotime
 
 import httpx
+from collections import Counter, defaultdict
 from telegram import Update, Bot
 from telegram.ext import (
     ApplicationBuilder,
@@ -26,6 +27,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from anthropic import AsyncAnthropic
+from influxdb_client.client.influxdb_client_async import InfluxDBClientAsync
 
 # ─── Config Validation ────────────────────────────────────────────────────────
 
@@ -56,6 +58,10 @@ TRIGGER_DIR = os.environ.get("TRIGGER_DIR", "/trigger")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 WATERGURU_POLL_INTERVAL = int(os.environ.get("WATERGURU_POLL_INTERVAL", "1800"))
 RATE_LIMIT_SECONDS = int(os.environ.get("RATE_LIMIT_SECONDS", "3"))
+INFLUXDB_URL = os.environ.get("INFLUXDB_URL", "http://influxdb:8086")
+INFLUXDB_TOKEN = os.environ.get("INFLUXDB_TOKEN", "")
+INFLUXDB_ORG = os.environ.get("INFLUXDB_ORG", "zaino")
+INFLUXDB_BUCKET = os.environ.get("INFLUXDB_BUCKET", "homeassistant")
 HEALTH_FILE = os.path.join(DATA_DIR, "bot_healthy")
 WATERGURU_LAST_FILE = os.path.join(DATA_DIR, "waterguru_last")
 HA_TOKEN_FILE = os.path.join(TRIGGER_DIR, "ha_token")
@@ -100,6 +106,18 @@ http_client = httpx.AsyncClient(
     headers={"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"},
     timeout=30.0,
 )
+
+# InfluxDB client (optional - for analytics)
+influx_client: InfluxDBClientAsync | None = None
+if INFLUXDB_TOKEN:
+    influx_client = InfluxDBClientAsync(
+        url=INFLUXDB_URL,
+        token=INFLUXDB_TOKEN,
+        org=INFLUXDB_ORG,
+    )
+    logger.info("InfluxDB client configured")
+else:
+    logger.warning("INFLUXDB_TOKEN not set — analytics features disabled")
 
 # ─── Conversation History ────────────────────────────────────────────────────
 
@@ -295,6 +313,175 @@ async def tool_get_ha_config() -> str:
     return json.dumps(config, ensure_ascii=False, default=str)
 
 
+# ─── InfluxDB Analytics Tools ────────────────────────────────────────────────
+
+
+async def tool_query_entity_history(entity_id: str, days: int = 7) -> str:
+    """Query long-term entity history from InfluxDB."""
+    if not influx_client:
+        return json.dumps({"error": "InfluxDB no configurado. Agregá INFLUXDB_TOKEN en .env"})
+
+    try:
+        query = (
+            f'from(bucket: "{INFLUXDB_BUCKET}")'
+            f" |> range(start: -{days}d)"
+            f' |> filter(fn: (r) => r["entity_id"] == "{entity_id}")'
+            ' |> sort(columns: ["_time"])'
+            " |> limit(n: 500)"
+        )
+
+        query_api = influx_client.query_api()
+        tables = await query_api.query(query, org=INFLUXDB_ORG)
+
+        records = []
+        for table in tables:
+            for record in table.records:
+                records.append({
+                    "time": record.get_time().isoformat(),
+                    "field": record.get_field(),
+                    "value": record.get_value(),
+                })
+
+        if not records:
+            return json.dumps({"message": f"Sin datos para {entity_id} en los últimos {days} días"})
+
+        if len(records) > 100:
+            return json.dumps({
+                "total_records": len(records),
+                "first_10": records[:10],
+                "last_10": records[-10:],
+                "note": f"Mostrando primeros y últimos 10 de {len(records)} registros",
+            }, ensure_ascii=False)
+
+        return json.dumps(records, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"InfluxDB query_entity_history error: {e}")
+        return json.dumps({"error": str(e)})
+
+
+async def tool_query_entity_stats(entity_id: str, days: int = 30) -> str:
+    """Get behavioral statistics for an entity: state distribution, hourly/daily patterns."""
+    if not influx_client:
+        return json.dumps({"error": "InfluxDB no configurado. Agregá INFLUXDB_TOKEN en .env"})
+
+    try:
+        query = (
+            f'from(bucket: "{INFLUXDB_BUCKET}")'
+            f" |> range(start: -{days}d)"
+            f' |> filter(fn: (r) => r["entity_id"] == "{entity_id}")'
+            ' |> sort(columns: ["_time"])'
+        )
+
+        query_api = influx_client.query_api()
+        tables = await query_api.query(query, org=INFLUXDB_ORG)
+
+        records = []
+        for table in tables:
+            for record in table.records:
+                records.append({
+                    "time": record.get_time(),
+                    "value": record.get_value(),
+                    "field": record.get_field(),
+                })
+
+        if not records:
+            return json.dumps({"message": f"Sin datos para {entity_id} en los últimos {days} días"})
+
+        # State change counts
+        state_counts = Counter(str(r["value"]) for r in records)
+
+        # Hourly distribution (hour of day → number of state changes)
+        hourly_activity = Counter(r["time"].hour for r in records)
+        hourly_sorted = {f"{h:02d}:00": hourly_activity[h] for h in range(24) if h in hourly_activity}
+
+        # Day of week distribution
+        day_names = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+        daily_activity = Counter(day_names[r["time"].weekday()] for r in records)
+
+        # State duration calculation (how long in each state)
+        state_durations = defaultdict(float)
+        for i in range(len(records) - 1):
+            state = str(records[i]["value"])
+            duration_h = (records[i + 1]["time"] - records[i]["time"]).total_seconds() / 3600
+            if duration_h < 720:  # ignore gaps > 30 days
+                state_durations[state] += duration_h
+
+        total_hours = sum(state_durations.values()) or 1
+        state_pct = {s: round(h / total_hours * 100, 1) for s, h in state_durations.items()}
+
+        stats = {
+            "entity_id": entity_id,
+            "period_days": days,
+            "total_state_changes": len(records),
+            "state_time_pct": state_pct,
+            "state_change_counts": dict(state_counts),
+            "hourly_pattern": hourly_sorted,
+            "daily_pattern": dict(daily_activity),
+        }
+
+        # Numeric stats if applicable
+        numeric_vals = [r["value"] for r in records if isinstance(r["value"], (int, float))]
+        if numeric_vals:
+            stats["numeric"] = {
+                "min": round(min(numeric_vals), 2),
+                "max": round(max(numeric_vals), 2),
+                "avg": round(sum(numeric_vals) / len(numeric_vals), 2),
+            }
+
+        return json.dumps(stats, ensure_ascii=False, default=str)
+
+    except Exception as e:
+        logger.error(f"InfluxDB query_entity_stats error: {e}")
+        return json.dumps({"error": str(e)})
+
+
+async def tool_query_home_activity(hours: int = 24, domain: str = None) -> str:
+    """Overview of home activity: most active entities, state changes by domain."""
+    if not influx_client:
+        return json.dumps({"error": "InfluxDB no configurado. Agregá INFLUXDB_TOKEN en .env"})
+
+    try:
+        domain_filter = ""
+        if domain:
+            domain_filter = f' |> filter(fn: (r) => r["domain"] == "{domain}")'
+
+        query = (
+            f'from(bucket: "{INFLUXDB_BUCKET}")'
+            f" |> range(start: -{hours}h)"
+            f"{domain_filter}"
+            ' |> group(columns: ["entity_id", "domain"])'
+            " |> count()"
+            " |> group()"
+            ' |> sort(columns: ["_value"], desc: true)'
+            " |> limit(n: 50)"
+        )
+
+        query_api = influx_client.query_api()
+        tables = await query_api.query(query, org=INFLUXDB_ORG)
+
+        entities = []
+        domain_totals = defaultdict(int)
+        for table in tables:
+            for record in table.records:
+                eid = record.values.get("entity_id", "")
+                dom = record.values.get("domain", "")
+                count = record.get_value()
+                entities.append({"entity_id": eid, "domain": dom, "changes": count})
+                domain_totals[dom] += count
+
+        return json.dumps({
+            "period_hours": hours,
+            "domain_filter": domain,
+            "changes_by_domain": dict(sorted(domain_totals.items(), key=lambda x: -x[1])),
+            "most_active_entities": entities[:30],
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        logger.error(f"InfluxDB query_home_activity error: {e}")
+        return json.dumps({"error": str(e)})
+
+
 # ─── Tool Registry ───────────────────────────────────────────────────────────
 
 TOOL_FUNCTIONS = {
@@ -305,6 +492,9 @@ TOOL_FUNCTIONS = {
     "search_entities": tool_search_entities,
     "get_history": tool_get_history,
     "get_ha_config": tool_get_ha_config,
+    "query_entity_history": tool_query_entity_history,
+    "query_entity_stats": tool_query_entity_stats,
+    "query_home_activity": tool_query_home_activity,
 }
 
 TOOLS = [
@@ -385,6 +575,41 @@ TOOLS = [
         "name": "get_ha_config",
         "description": "Get Home Assistant system configuration and version info.",
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "query_entity_history",
+        "description": "Query long-term entity history from InfluxDB (days/weeks/months, not limited to HA's 10-day retention). Use this for trend analysis over extended periods.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_id": {"type": "string", "description": "Entity to query history for"},
+                "days": {"type": "integer", "description": "Days of history to query (default 7, max 365)"},
+            },
+            "required": ["entity_id"],
+        },
+    },
+    {
+        "name": "query_entity_stats",
+        "description": "Get behavioral statistics for an entity from InfluxDB: percentage of time in each state, hourly patterns (when it's typically active), day-of-week patterns, and numeric stats. Use this to understand habits and detect anomalies.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entity_id": {"type": "string", "description": "Entity to analyze"},
+                "days": {"type": "integer", "description": "Days of data to analyze (default 30, max 365)"},
+            },
+            "required": ["entity_id"],
+        },
+    },
+    {
+        "name": "query_home_activity",
+        "description": "Overview of home activity from InfluxDB: most active entities, state changes grouped by domain. Use this to understand overall home behavior patterns.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hours": {"type": "integer", "description": "Hours of activity to analyze (default 24)"},
+                "domain": {"type": "string", "description": "Optional domain filter (light, lock, climate, etc.)"},
+            },
+        },
     },
 ]
 
@@ -545,6 +770,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/status - Estado general de la casa\n"
         "/pileta - Estado completo de la pileta\n"
         "/musica - ¿Qué suena en la casa?\n"
+        "/analytics - Análisis de actividad del hogar\n"
         "/logs - Ver logs del bot\n"
         "/version - Versión y uptime\n"
         "/update - Actualizar bot desde GitHub",
@@ -646,6 +872,20 @@ async def cmd_musica(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = await run_with_typing(update, chat_with_claude(
         update.effective_user.id,
         "Dame el estado de la música en la casa: qué parlantes están reproduciendo algo, qué suena en cada uno, volumen, y si hay grupos armados. Solo mostrá los que estén activos (playing/paused), no los idle.",
+    ))
+    await send_long_message(update, response)
+
+
+@authorized
+async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not influx_client:
+        await update.message.reply_text("⚠️ InfluxDB no está configurado. Agregá INFLUXDB_TOKEN en .env")
+        return
+    response = await run_with_typing(update, chat_with_claude(
+        update.effective_user.id,
+        "Usá las herramientas de analytics (query_home_activity, query_entity_stats) para darme un resumen "
+        "de la actividad de la casa en las últimas 24 horas. Incluí: dominios más activos, entidades con más "
+        "cambios de estado, y cualquier patrón interesante que notes. Sé conciso y visual con emojis.",
     ))
     await send_long_message(update, response)
 
@@ -1035,6 +1275,7 @@ def main():
     app.add_handler(CommandHandler("settoken", cmd_settoken))
     app.add_handler(CommandHandler("pileta", cmd_pileta))
     app.add_handler(CommandHandler("musica", cmd_musica))
+    app.add_handler(CommandHandler("analytics", cmd_analytics))
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("version", cmd_version))
     app.add_handler(CommandHandler("history", cmd_history))
